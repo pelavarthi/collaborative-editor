@@ -1,0 +1,8 @@
+[package]
+name = "collab-ot"
+version = "0.1.0"
+edition = "2021"
+description = "Operational transformation core for the collaborative editor"
+license = "MIT"
+
+[dependencies]
