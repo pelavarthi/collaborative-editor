@@ -4,7 +4,9 @@
 // day 2's transform needs it to break ties when two sites insert at the
 // same position.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     Insert { site: u64, pos: usize, text: String },
     Delete { site: u64, pos: usize, len: usize },

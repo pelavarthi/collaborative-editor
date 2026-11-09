@@ -6,3 +6,4 @@ description = "Operational transformation core for the collaborative editor"
 license = "MIT"
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
