@@ -13,6 +13,9 @@ pub enum ClientMessage {
     Join { room: String, client_id: u64 },
     /// An edit made against the document as it was at `base_version`.
     Op { base_version: usize, op: Op },
+    /// A reconnecting client asking for the ops it missed since
+    /// `base_version`, so it can catch up without taking a full copy.
+    Sync { base_version: usize },
 }
 
 /// A message the server sends to a client.
@@ -29,6 +32,12 @@ pub enum ServerMessage {
     Op { version: usize, op: Op },
     /// The server applied this client's op; `version` is the new version.
     Ack { version: usize },
+    /// The ops a syncing client missed, starting at `from_version`.
+    /// Applying them in order brings it up to date.
+    Ops { from_version: usize, ops: Vec<Op> },
+    /// The answer to a sync when the client's version is older than the
+    /// ops the server still keeps: take the whole document instead.
+    Snapshot { text: String, version: usize },
     /// Something about the client's last message was wrong; the
     /// connection stays open.
     Error { message: String },

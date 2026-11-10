@@ -12,7 +12,12 @@ use collab_ot::{transform, Document, Op};
 #[derive(Debug, Default)]
 pub struct Room {
     doc: Document,
+    /// The ops applied since the last snapshot. `history[i]` is the op
+    /// that moved the document from version `base + i` to `base + i + 1`,
+    /// so after a restore from a snapshot at version N the history only
+    /// holds ops after N.
     history: Vec<Op>,
+    base: usize,
 }
 
 impl Room {
@@ -20,12 +25,35 @@ impl Room {
         Self::default()
     }
 
+    /// Rebuilds a room from a snapshot plus the ops applied since it:
+    /// `doc` is the text at `base + history.len()`.
+    pub fn from_parts(doc: Document, base: usize, history: Vec<Op>) -> Self {
+        Self { doc, history, base }
+    }
+
     pub fn text(&self) -> &str {
         self.doc.text()
     }
 
     pub fn version(&self) -> usize {
-        self.history.len()
+        self.base + self.history.len()
+    }
+
+    /// The earliest version a client can still catch up from: ops
+    /// before this one were folded into the snapshot and are gone.
+    pub fn earliest_version(&self) -> usize {
+        self.base
+    }
+
+    /// The ops a client at `version` has not seen yet, or `None` when
+    /// that version is older than the snapshot (it needs the full text)
+    /// or ahead of the server (it claims to have seen ops that do not
+    /// exist yet).
+    pub fn ops_since(&self, version: usize) -> Option<&[Op]> {
+        if version < self.base || version > self.version() {
+            return None;
+        }
+        Some(&self.history[version - self.base..])
     }
 
     /// Applies an op a client made against `base_version` of the history.
@@ -101,5 +129,31 @@ mod tests {
         let mut room = Room::new();
         let err = room.apply(&Op::insert(1, 0, "x"), 1).unwrap_err();
         assert!(err.contains("ahead of server version 0"));
+    }
+
+    #[test]
+    fn ops_since_returns_only_the_missed_ops() {
+        let mut room = Room::new();
+        room.apply(&Op::insert(1, 0, "a"), 0).unwrap();
+        room.apply(&Op::insert(1, 1, "b"), 1).unwrap();
+        room.apply(&Op::insert(1, 2, "c"), 2).unwrap();
+        assert_eq!(
+            room.ops_since(1),
+            Some([Op::insert(1, 1, "b"), Op::insert(1, 2, "c")].as_slice())
+        );
+        assert_eq!(room.ops_since(3), Some([].as_slice()));
+        assert_eq!(room.ops_since(4), None);
+    }
+
+    #[test]
+    fn restored_room_replays_only_ops_after_its_snapshot() {
+        let doc = Document::from_text("ab");
+        let history = vec![Op::insert(1, 2, "c")];
+        let room = Room::from_parts(doc, 2, history);
+        assert_eq!(room.text(), "ab");
+        assert_eq!(room.version(), 3);
+        assert_eq!(room.earliest_version(), 2);
+        assert_eq!(room.ops_since(1), None);
+        assert_eq!(room.ops_since(2), Some([Op::insert(1, 2, "c")].as_slice()));
     }
 }

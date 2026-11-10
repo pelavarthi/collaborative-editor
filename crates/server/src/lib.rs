@@ -6,20 +6,33 @@
 //! yet, applies it, and broadcasts the transformed op to everyone else
 //! in the room. The version is the number of ops applied so far, so a
 //! client's `base_version` says exactly which history it has seen.
+//!
+//! Rooms live on disk too: every op is appended to a per-room log and a
+//! snapshot is written every fifty ops, so a restarted server reloads
+//! each room as it was. A client that reconnects can ask for just the
+//! ops it missed since its last version instead of the whole document.
 
 pub mod message;
 pub mod room;
+pub mod store;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use collab_ot::Op;
 use futures_util::{SinkExt, StreamExt};
 use message::{ClientMessage, ServerMessage};
 use room::Room;
+use store::Store;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+/// How many ops a room applies before it writes a fresh snapshot and
+/// trims the log back to the ops after it.
+const SNAPSHOT_EVERY: usize = 50;
 
 /// What a room sends to its members. `from` is the client that sent the
 /// op, so each connection can skip its own echo and wait for the ack
@@ -33,14 +46,48 @@ struct Broadcast {
 struct RoomState {
     room: Room,
     tx: broadcast::Sender<Broadcast>,
+    store: Store,
+    /// Ops applied since the last snapshot; at SNAPSHOT_EVERY the room
+    /// snapshots and trims its log.
+    ops_since_snapshot: usize,
 }
 
 impl RoomState {
-    fn new() -> Self {
+    fn new(data_dir: &Path, room_id: &str) -> Self {
         let (tx, _) = broadcast::channel(64);
+        let store = Store::new(data_dir, room_id);
+        let room = match store.load() {
+            Ok(Some(restored)) => Room::from_parts(restored.doc, restored.base, restored.history),
+            Ok(None) => Room::new(),
+            Err(err) => {
+                eprintln!("could not load room {room_id} from disk: {err}; starting empty");
+                Room::new()
+            }
+        };
+        // The restored history is exactly the ops since the snapshot.
+        let ops_since_snapshot = room.version() - room.earliest_version();
         Self {
-            room: Room::new(),
+            room,
             tx,
+            store,
+            ops_since_snapshot,
+        }
+    }
+
+    /// Records an op the room just applied: append it to the log, and
+    /// snapshot when enough ops have piled up since the last one.
+    fn persist(&mut self, op: &Op, version: usize) {
+        if let Err(err) = self.store.append(version, op) {
+            eprintln!("could not append op {version} to the log: {err}");
+            return;
+        }
+        self.ops_since_snapshot += 1;
+        if self.ops_since_snapshot >= SNAPSHOT_EVERY {
+            if let Err(err) = self.store.save_snapshot(version, self.room.text()) {
+                eprintln!("could not save snapshot at version {version}: {err}");
+                return;
+            }
+            self.ops_since_snapshot = 0;
         }
     }
 }
@@ -48,19 +95,26 @@ impl RoomState {
 /// All rooms. One hub is shared by every connection.
 pub struct Hub {
     rooms: HashMap<String, RoomState>,
+    data_dir: PathBuf,
 }
 
 impl Hub {
     pub fn new() -> Self {
+        Self::with_data_dir("data")
+    }
+
+    pub fn with_data_dir(data_dir: impl AsRef<Path>) -> Self {
         Self {
             rooms: HashMap::new(),
+            data_dir: data_dir.as_ref().to_path_buf(),
         }
     }
 
     fn room(&mut self, id: &str) -> &mut RoomState {
+        let data_dir = self.data_dir.clone();
         self.rooms
             .entry(id.to_string())
-            .or_insert_with(RoomState::new)
+            .or_insert_with(|| RoomState::new(&data_dir, id))
     }
 }
 
@@ -71,8 +125,17 @@ impl Default for Hub {
 }
 
 /// Serves WebSocket connections on `listener` until it errors.
+/// Rooms are persisted under `./data`.
 pub async fn serve(listener: TcpListener) -> std::io::Result<()> {
-    let hub = Arc::new(Mutex::new(Hub::new()));
+    serve_with_data_dir(listener, "data").await
+}
+
+/// Like `serve`, but rooms are persisted under `data_dir`.
+pub async fn serve_with_data_dir(
+    listener: TcpListener,
+    data_dir: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    let hub = Arc::new(Mutex::new(Hub::with_data_dir(data_dir)));
     loop {
         let (stream, addr) = listener.accept().await?;
         let hub = Arc::clone(&hub);
@@ -186,6 +249,34 @@ async fn handle_message(
         ClientMessage::Join { .. } => Some(ServerMessage::Error {
             message: "already joined a room".into(),
         }),
+        ClientMessage::Sync { base_version } => {
+            let hub = hub.lock().await;
+            let Some(state) = hub.rooms.get(room_id) else {
+                return Some(ServerMessage::Error {
+                    message: "not in a room".into(),
+                });
+            };
+            let room = &state.room;
+            if base_version > room.version() {
+                return Some(ServerMessage::Error {
+                    message: format!(
+                        "base version {base_version} is ahead of server version {}",
+                        room.version()
+                    ),
+                });
+            }
+            match room.ops_since(base_version) {
+                Some(ops) => Some(ServerMessage::Ops {
+                    from_version: base_version,
+                    ops: ops.to_vec(),
+                }),
+                // Too far behind to replay: send the whole document.
+                None => Some(ServerMessage::Snapshot {
+                    text: room.text().to_string(),
+                    version: room.version(),
+                }),
+            }
+        }
         ClientMessage::Op { base_version, op } => {
             if op.site() != client_id {
                 return Some(ServerMessage::Error {
@@ -196,6 +287,7 @@ async fn handle_message(
             let state = hub.room(room_id);
             match state.room.apply(&op, base_version) {
                 Ok(Some((op, version))) => {
+                    state.persist(&op, version);
                     let _ = state.tx.send(Broadcast {
                         from: client_id,
                         message: ServerMessage::Op { version, op },
