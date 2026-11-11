@@ -11,8 +11,15 @@
 //! snapshot is written every fifty ops, so a restarted server reloads
 //! each room as it was. A client that reconnects can ask for just the
 //! ops it missed since its last version instead of the whole document.
+//!
+//! Presence rides alongside: each client reports where its caret is
+//! and what it has selected, the server hands each client a colour,
+//! and everyone in the room sees everyone else's cursor move. When an
+//! op lands, the other clients' cursors shift past it so they keep
+//! pointing at the same text. Presence is never saved to disk.
 
 pub mod message;
+pub mod presence;
 pub mod room;
 pub mod store;
 
@@ -24,6 +31,7 @@ use std::sync::Arc;
 use collab_ot::Op;
 use futures_util::{SinkExt, StreamExt};
 use message::{ClientMessage, ServerMessage};
+use presence::PresenceMap;
 use room::Room;
 use store::Store;
 use tokio::net::{TcpListener, TcpStream};
@@ -47,6 +55,9 @@ struct RoomState {
     room: Room,
     tx: broadcast::Sender<Broadcast>,
     store: Store,
+    /// Who is in the room right now, where their carets are, and what
+    /// colour each of them gets. Never saved to disk.
+    presence: PresenceMap,
     /// Ops applied since the last snapshot; at SNAPSHOT_EVERY the room
     /// snapshots and trims its log.
     ops_since_snapshot: usize,
@@ -70,6 +81,7 @@ impl RoomState {
             room,
             tx,
             store,
+            presence: PresenceMap::new(),
             ops_since_snapshot,
         }
     }
@@ -158,18 +170,31 @@ async fn handle_connection(
     // to do.
     let (room_id, client_id, mut rx) = match read.next().await {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
-            Ok(ClientMessage::Join { room, client_id }) => {
+            Ok(ClientMessage::Join {
+                room,
+                client_id,
+                name,
+            }) => {
                 let mut hub = hub.lock().await;
                 let state = hub.room(&room);
                 let joined = ServerMessage::Joined {
                     room: room.clone(),
                     text: state.room.text().to_string(),
                     version: state.room.version(),
+                    presences: state.presence.all(),
                 };
                 let rx = state.tx.subscribe();
                 write
                     .send(Message::Text(serde_json::to_string(&joined)?.into()))
                     .await?;
+                // Only once the client actually got the Joined is it
+                // in the room: a failed send leaves no presence behind.
+                let presence = state.presence.join(client_id, name);
+                // Everyone already here learns about the new arrival.
+                let _ = state.tx.send(Broadcast {
+                    from: client_id,
+                    message: ServerMessage::Presence { presence },
+                });
                 (room, client_id, rx)
             }
             _ => return Err("first message was not a join".into()),
@@ -181,21 +206,24 @@ async fn handle_connection(
 
     // From here on, incoming ops and room broadcasts run side by side:
     // an op is applied and fanned out, a broadcast is forwarded unless
-    // it came from this client.
+    // it came from this client. Any failure of the socket ends the
+    // session by breaking out, so the disconnect cleanup below always
+    // runs — a dropped connection must drop the client's cursor too.
     loop {
         tokio::select! {
             incoming = read.next() => {
                 let Some(msg) = incoming else { break };
-                let msg = msg?;
+                let Ok(msg) = msg else { break };
                 if msg.is_close() {
                     break;
                 }
                 let Message::Text(text) = msg else { continue };
                 let reply = handle_message(&text, &room_id, client_id, &hub).await;
                 if let Some(reply) = reply {
-                    write
-                        .send(Message::Text(serde_json::to_string(&reply)?.into()))
-                        .await?;
+                    let Ok(text) = serde_json::to_string(&reply) else { break };
+                    if write.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
                 }
             }
             broadcast = rx.recv() => {
@@ -204,9 +232,10 @@ async fn handle_connection(
                         if broadcast.from == client_id {
                             continue;
                         }
-                        write
-                            .send(Message::Text(serde_json::to_string(&broadcast.message)?.into()))
-                            .await?;
+                        let Ok(text) = serde_json::to_string(&broadcast.message) else { break };
+                        if write.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // This client fell too far behind to catch up from
@@ -214,13 +243,26 @@ async fn handle_connection(
                         let reply = ServerMessage::Error {
                             message: "missed messages, please rejoin".into(),
                         };
-                        write
-                            .send(Message::Text(serde_json::to_string(&reply)?.into()))
-                            .await?;
+                        if let Ok(text) = serde_json::to_string(&reply) {
+                            let _ = write.send(Message::Text(text.into())).await;
+                        }
                         break;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
+            }
+        }
+    }
+
+    // The client left: drop its cursor from the room and tell the rest.
+    {
+        let mut hub = hub.lock().await;
+        if let Some(state) = hub.rooms.get_mut(&room_id) {
+            if state.presence.remove(client_id).is_some() {
+                let _ = state.tx.send(Broadcast {
+                    from: client_id,
+                    message: ServerMessage::PresenceLeft { client_id },
+                });
             }
         }
     }
@@ -277,6 +319,27 @@ async fn handle_message(
                 }),
             }
         }
+        ClientMessage::Presence { cursor, selection } => {
+            let mut hub = hub.lock().await;
+            let Some(state) = hub.rooms.get_mut(room_id) else {
+                return Some(ServerMessage::Error {
+                    message: "not in a room".into(),
+                });
+            };
+            let doc_len = state.room.text().chars().count();
+            match state.presence.update(client_id, cursor, selection, doc_len) {
+                Some(presence) => {
+                    let _ = state.tx.send(Broadcast {
+                        from: client_id,
+                        message: ServerMessage::Presence { presence },
+                    });
+                    None
+                }
+                None => Some(ServerMessage::Error {
+                    message: "not in a room".into(),
+                }),
+            }
+        }
         ClientMessage::Op { base_version, op } => {
             if op.site() != client_id {
                 return Some(ServerMessage::Error {
@@ -290,8 +353,20 @@ async fn handle_message(
                     state.persist(&op, version);
                     let _ = state.tx.send(Broadcast {
                         from: client_id,
-                        message: ServerMessage::Op { version, op },
+                        message: ServerMessage::Op {
+                            version,
+                            op: op.clone(),
+                        },
                     });
+                    // The edit moved everyone else's caret past it, so
+                    // their cursors keep pointing at the same text.
+                    // The op goes out first, then the moved cursors.
+                    for presence in state.presence.shift_for_op(&op) {
+                        let _ = state.tx.send(Broadcast {
+                            from: client_id,
+                            message: ServerMessage::Presence { presence },
+                        });
+                    }
                     Some(ServerMessage::Ack { version })
                 }
                 Ok(None) => Some(ServerMessage::Ack {
