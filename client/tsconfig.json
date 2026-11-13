@@ -1,0 +1,1 @@
+{"compilerOptions":{"declaration":false,"exactOptionalPropertyTypes":true,"lib":["ES2022","DOM","DOM.Iterable"],"module":"NodeNext","moduleResolution":"NodeNext","noUncheckedIndexedAccess":true,"outDir":"dist","rootDir":"src","sourceMap":false,"strict":true,"target":"ES2022"},"include":["src"]}
