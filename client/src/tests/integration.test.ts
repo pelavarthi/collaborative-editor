@@ -56,6 +56,44 @@ async function connectClient(site: number, addr: string, room: string): Promise<
 }
 
 test(
+  "a client that drops reconnects and its queued edits land",
+  { skip: !existsSync(serverBin) },
+  async (t) => {
+    const { proc, addr, dir } = await startServer();
+    t.after(() => {
+      proc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    const a = await connectClient(1, addr, "drop-and-return");
+    const b = await connectClient(2, addr, "drop-and-return");
+    t.after(() => {
+      a.close();
+      b.close();
+    });
+
+    a.localEdit("hello");
+    await waitFor("B to receive hello", () => b.editor.text === "hello");
+    // Wait for A's ack too, so only the offline edit is pending below.
+    await waitFor("A's first edit to be acked", () => a.pendingCount === 0);
+
+    // A drops off the network and keeps typing while it is down.
+    a.dropConnection();
+    await waitFor("A to report reconnecting", () => a.status === "reconnecting");
+    a.localEdit("hello world");
+    assert.equal(a.pendingCount, 1);
+    assert.equal(b.editor.text, "hello");
+
+    // A rejoins on its own, resends the queued edit, and both sides
+    // end up with the same text.
+    await waitFor("A to reconnect", () => a.status === "connected");
+    await waitFor("B to receive the queued edit", () => b.editor.text === "hello world");
+    assert.equal(a.editor.text, "hello world");
+    assert.equal(a.pendingCount, 0);
+  },
+);
+
+test(
   "two clients type together and converge",
   { skip: !existsSync(serverBin) },
   async (t) => {

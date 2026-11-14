@@ -21,14 +21,15 @@ test("join without a name omits the field", () => {
 
 test("op encodes with the Rust externally-tagged shape", () => {
   // Serde serializes the Rust Op enum as {"Insert": {...}}, not with a
-  // "type" tag, so the client must send exactly this.
+  // "type" tag, so the client must send exactly this. `seq` counts the
+  // client's ops from 1 up, so a resend after a lost ack is recognizable.
   assert.equal(
-    encodeClient({ type: "op", base_version: 3, op: insertOp(1, 0, "hi") }),
-    '{"type":"op","base_version":3,"op":{"Insert":{"site":1,"pos":0,"text":"hi"}}}',
+    encodeClient({ type: "op", base_version: 3, seq: 2, op: insertOp(1, 0, "hi") }),
+    '{"type":"op","base_version":3,"seq":2,"op":{"Insert":{"site":1,"pos":0,"text":"hi"}}}',
   );
   assert.equal(
-    encodeClient({ type: "op", base_version: 3, op: deleteOp(1, 2, 4) }),
-    '{"type":"op","base_version":3,"op":{"Delete":{"site":1,"pos":2,"len":4}}}',
+    encodeClient({ type: "op", base_version: 3, seq: 2, op: deleteOp(1, 2, 4) }),
+    '{"type":"op","base_version":3,"seq":2,"op":{"Delete":{"site":1,"pos":2,"len":4}}}',
   );
 });
 
@@ -49,7 +50,19 @@ test("decode joined, ack, and op messages", () => {
     assert.equal(joined.presences[0]?.name, "hriday");
   }
 
-  assert.deepEqual(decodeServer('{"type":"ack","version":4}'), { type: "ack", version: 4 });
+  assert.deepEqual(
+    decodeServer(
+      '{"type":"ack","version":4,"seq":2,"op":{"Insert":{"site":1,"pos":0,"text":"hi"}}}',
+    ),
+    { type: "ack", version: 4, seq: 2, op: insertOp(1, 0, "hi") },
+  );
+  // An ack for an op that transformed into a no-op carries a null op.
+  assert.deepEqual(decodeServer('{"type":"ack","version":4,"seq":2,"op":null}'), {
+    type: "ack",
+    version: 4,
+    seq: 2,
+    op: null,
+  });
   assert.deepEqual(decodeServer('{"type":"op","version":2,"op":{"Insert":{"site":2,"pos":0,"text":"x"}}}'), {
     type: "op",
     version: 2,
@@ -97,6 +110,7 @@ test("decode rejects garbage and unknown types", () => {
   assert.throws(() => decodeServer("not json"), /not JSON/);
   assert.throws(() => decodeServer('{"type":"nope"}'), /not a server message/);
   assert.throws(() => decodeServer('{"type":"op","version":1}'), /not a server message/);
+  assert.throws(() => decodeServer('{"type":"ack","version":1}'), /not a server message/);
 });
 
 test("op helpers", () => {

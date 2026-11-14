@@ -61,6 +61,10 @@ struct RoomState {
     /// Ops applied since the last snapshot; at SNAPSHOT_EVERY the room
     /// snapshots and trims its log.
     ops_since_snapshot: usize,
+    /// The ops already applied, by (client, seq): a client that resends
+    /// an op because its ack was lost gets the stored answer back
+    /// instead of the op being applied twice. Kept in memory only.
+    acked: HashMap<(u64, u64), (usize, Op)>,
 }
 
 impl RoomState {
@@ -83,6 +87,7 @@ impl RoomState {
             store,
             presence: PresenceMap::new(),
             ops_since_snapshot,
+            acked: HashMap::new(),
         }
     }
 
@@ -340,7 +345,7 @@ async fn handle_message(
                 }),
             }
         }
-        ClientMessage::Op { base_version, op } => {
+        ClientMessage::Op { base_version, seq, op } => {
             if op.site() != client_id {
                 return Some(ServerMessage::Error {
                     message: "op site does not match client id".into(),
@@ -348,9 +353,19 @@ async fn handle_message(
             }
             let mut hub = hub.lock().await;
             let state = hub.room(room_id);
+            // A resend of an op whose ack was lost: answer from memory
+            // instead of applying it a second time.
+            if let Some((version, applied)) = state.acked.get(&(client_id, seq)) {
+                return Some(ServerMessage::Ack {
+                    version: *version,
+                    seq,
+                    op: Some(applied.clone()),
+                });
+            }
             match state.room.apply(&op, base_version) {
                 Ok(Some((op, version))) => {
                     state.persist(&op, version);
+                    state.acked.insert((client_id, seq), (version, op.clone()));
                     let _ = state.tx.send(Broadcast {
                         from: client_id,
                         message: ServerMessage::Op {
@@ -367,10 +382,16 @@ async fn handle_message(
                             message: ServerMessage::Presence { presence },
                         });
                     }
-                    Some(ServerMessage::Ack { version })
+                    Some(ServerMessage::Ack {
+                        version,
+                        seq,
+                        op: Some(op),
+                    })
                 }
                 Ok(None) => Some(ServerMessage::Ack {
                     version: state.room.version(),
+                    seq,
+                    op: None,
                 }),
                 Err(message) => Some(ServerMessage::Error { message }),
             }

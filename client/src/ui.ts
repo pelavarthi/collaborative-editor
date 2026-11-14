@@ -67,10 +67,13 @@ export function bindEditor(
         ? "connected"
         : client.status === "connecting"
           ? "connecting…"
-          : "disconnected";
+          : client.status === "reconnecting"
+            ? "reconnecting…"
+            : "disconnected";
+    const unsent = client.pendingCount > 0 ? ` · ${client.pendingCount} unsent` : "";
     statusEl.textContent = client.lastError
-      ? `${state} · room ${client.room} · v${client.editor.version} · ${client.lastError}`
-      : `${state} · room ${client.room} · v${client.editor.version}`;
+      ? `${state} · room ${client.room} · v${client.editor.version}${unsent} · ${client.lastError}`
+      : `${state} · room ${client.room} · v${client.editor.version}${unsent}`;
   };
 
   const renderAll = () => {

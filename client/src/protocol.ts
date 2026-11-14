@@ -45,14 +45,19 @@ export interface Presence {
 
 export type ClientMessage =
   | { type: "join"; room: string; client_id: number; name?: string }
-  | { type: "op"; base_version: number; op: Op }
+  | { type: "op"; base_version: number; seq: number; op: Op }
   | { type: "sync"; base_version: number }
   | { type: "presence"; cursor: number; selection: Selection | null };
 
 export type ServerMessage =
   | { type: "joined"; room: string; text: string; version: number; presences: Presence[] }
   | { type: "op"; version: number; op: Op }
-  | { type: "ack"; version: number }
+  // `seq` echoes the op's number, so the client knows which queued op
+  // this ack is for. `op` is the op as the server applied it, or null
+  // when it transformed into a no-op: the client applies it when its
+  // own echo was wiped by a rejoin, and ignores it when the op is
+  // already in its text.
+  | { type: "ack"; version: number; seq: number; op: Op | null }
   | { type: "ops"; from_version: number; ops: Op[] }
   | { type: "snapshot"; text: string; version: number }
   | { type: "presence"; presence: Presence }
@@ -132,7 +137,13 @@ export function decodeServer(text: string): ServerMessage {
       }
       break;
     case "ack":
-      if (typeof value.version === "number") return value as ServerMessage;
+      if (
+        typeof value.version === "number" &&
+        typeof value.seq === "number" &&
+        (value.op === null || isOp(value.op))
+      ) {
+        return value as ServerMessage;
+      }
       break;
     case "ops":
       if (

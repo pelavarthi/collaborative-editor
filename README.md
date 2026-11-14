@@ -20,3 +20,10 @@ npm start       # serves the editor at http://localhost:3000
 Start the server first (`cargo run -p collab-server`), then open
 http://localhost:3000/?room=notes&name=pranav. Open the same room in a
 second tab to see live cursors and shared typing.
+
+Edits are numbered, and each one stays queued until the server acks it.
+If the connection drops, the client reconnects on its own (backing off
+from half a second up to eight) and resends whatever was not acked; the
+server answers a resend from memory instead of applying the edit twice,
+and the ack carries the edit as the server applied it, so the client's
+copy ends up matching even when other people typed in the meantime.

@@ -59,16 +59,26 @@ impl Room {
     /// Applies an op a client made against `base_version` of the history.
     /// Returns the op as applied (after transforming it past the ops the
     /// client had not seen) and the new version, or `None` when the op
-    /// transformed into a no-op and changed nothing.
+    /// transformed into a no-op and changed nothing. `base_version` is a
+    /// version in the room's numbering, not an index into the history
+    /// kept since the last snapshot: after a restore the history starts
+    /// at `base`, so the ops to transform past begin at
+    /// `base_version - base`.
     pub fn apply(&mut self, op: &Op, base_version: usize) -> Result<Option<(Op, usize)>, String> {
-        if base_version > self.history.len() {
+        if base_version < self.base {
+            return Err(format!(
+                "base version {base_version} is older than the snapshot at version {}",
+                self.base
+            ));
+        }
+        if base_version > self.version() {
             return Err(format!(
                 "base version {base_version} is ahead of server version {}",
-                self.history.len()
+                self.version()
             ));
         }
         let mut transformed = op.clone();
-        for seen in &self.history[base_version..] {
+        for seen in &self.history[base_version - self.base..] {
             transformed = transform(&transformed, seen);
         }
         if transformed.is_noop() {
@@ -78,7 +88,7 @@ impl Room {
             .apply(&transformed)
             .map_err(|err| err.to_string())?;
         self.history.push(transformed.clone());
-        Ok(Some((transformed, self.history.len())))
+        Ok(Some((transformed, self.version())))
     }
 }
 
@@ -155,5 +165,34 @@ mod tests {
         assert_eq!(room.earliest_version(), 2);
         assert_eq!(room.ops_since(1), None);
         assert_eq!(room.ops_since(2), Some([Op::insert(1, 2, "c")].as_slice()));
+    }
+
+    #[test]
+    fn apply_on_restored_room_counts_from_the_snapshot_base() {
+        let doc = Document::from_text("ab");
+        let history = vec![Op::insert(1, 2, "c")];
+        let mut room = Room::from_parts(doc, 2, history);
+        // An op made against the snapshot (version 2) transforms past
+        // the one op since it and lands at version 4, not 2.
+        let (op, version) = room.apply(&Op::insert(2, 0, ">> "), 2).unwrap().unwrap();
+        assert_eq!(op, Op::insert(2, 0, ">> "));
+        assert_eq!(version, 4);
+        assert_eq!(room.text(), ">> ab");
+        // An op made against the latest version applies as-is.
+        let (op, version) = room.apply(&Op::insert(2, 5, "!"), 4).unwrap().unwrap();
+        assert_eq!(op, Op::insert(2, 5, "!"));
+        assert_eq!(version, 5);
+        assert_eq!(room.text(), ">> ab!");
+    }
+
+    #[test]
+    fn apply_with_base_before_the_snapshot_is_an_error() {
+        let doc = Document::from_text("ab");
+        let history = vec![Op::insert(1, 2, "c")];
+        let mut room = Room::from_parts(doc, 2, history);
+        let err = room.apply(&Op::insert(2, 0, "x"), 1).unwrap_err();
+        assert!(err.contains("older than the snapshot at version 2"));
+        let err = room.apply(&Op::insert(2, 0, "x"), 4).unwrap_err();
+        assert!(err.contains("ahead of server version 3"));
     }
 }

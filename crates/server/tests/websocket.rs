@@ -37,6 +37,7 @@ fn presence(client_id: u64, name: Option<&str>) -> Presence {
 struct Client {
     write: futures_util::stream::SplitSink<WsStream, Message>,
     read: futures_util::stream::SplitStream<WsStream>,
+    next_seq: u64,
 }
 
 impl Client {
@@ -64,7 +65,11 @@ impl Client {
             .send(Message::Text(serde_json::to_string(&join).unwrap().into()))
             .await
             .unwrap();
-        let mut client = Self { write, read };
+        let mut client = Self {
+            write,
+            read,
+            next_seq: 1,
+        };
         let joined = client.next_server_message().await;
         assert!(matches!(joined, ServerMessage::Joined { .. }));
         (client, joined)
@@ -77,8 +82,22 @@ impl Client {
             .unwrap();
     }
 
+    /// Sends an op with the next sequence number for this client.
     async fn send_op(&mut self, base_version: usize, op: Op) {
-        self.send(&ClientMessage::Op { base_version, op }).await;
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.send_op_with_seq(base_version, seq, op).await;
+    }
+
+    /// Sends an op with an explicit sequence number: a resend after a
+    /// lost ack reuses the number of the op it repeats.
+    async fn send_op_with_seq(&mut self, base_version: usize, seq: u64, op: Op) {
+        self.send(&ClientMessage::Op {
+            base_version,
+            seq,
+            op,
+        })
+        .await;
     }
 
     async fn send_sync(&mut self, base_version: usize) {
@@ -133,7 +152,11 @@ async fn op_from_one_client_reaches_the_other() {
     a.send_op(0, Op::insert(1, 0, "hello")).await;
     assert_eq!(
         a.next_server_message().await,
-        ServerMessage::Ack { version: 1 }
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello")),
+        }
     );
     assert_eq!(
         b.next_server_message().await,
@@ -145,6 +168,46 @@ async fn op_from_one_client_reaches_the_other() {
 }
 
 #[tokio::test]
+async fn resent_op_after_a_lost_ack_applies_once() {
+    let (addr, _server, _dir) = start_server().await;
+    let (mut a, _) = Client::connect(addr, "room1", 1).await;
+    let (mut b, _) = Client::connect(addr, "room1", 2).await;
+
+    // A sends an edit and gets its ack.
+    a.send_op_with_seq(0, 1, Op::insert(1, 0, "hello")).await;
+    assert_eq!(
+        a.next_server_message().await,
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello")),
+        }
+    );
+    assert_eq!(
+        b.next_server_message().await,
+        ServerMessage::Op {
+            version: 1,
+            op: Op::insert(1, 0, "hello"),
+        }
+    );
+
+    // The ack is lost on the way back, so A resends the same op with
+    // the same number: the server answers from memory instead of
+    // applying it again, and B sees nothing twice.
+    a.send_op_with_seq(0, 1, Op::insert(1, 0, "hello")).await;
+    assert_eq!(
+        a.next_server_message().await,
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello")),
+        }
+    );
+    let echo = tokio::time::timeout(Duration::from_millis(200), b.next_server_message()).await;
+    assert!(echo.is_err(), "resent op was broadcast twice: {echo:?}");
+}
+
+#[tokio::test]
 async fn rooms_are_isolated() {
     let (addr, _server, _dir) = start_server().await;
     let (mut a, _) = Client::connect(addr, "room1", 1).await;
@@ -153,7 +216,11 @@ async fn rooms_are_isolated() {
     a.send_op(0, Op::insert(1, 0, "hello")).await;
     assert_eq!(
         a.next_server_message().await,
-        ServerMessage::Ack { version: 1 }
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello")),
+        }
     );
     // Nothing from room1 may leak into room2.
     let leaked = tokio::time::timeout(Duration::from_millis(200), c.next_server_message()).await;
@@ -170,7 +237,11 @@ async fn late_joiner_gets_current_text() {
     a.send_op(0, Op::insert(1, 0, "hello")).await;
     assert_eq!(
         a.next_server_message().await,
-        ServerMessage::Ack { version: 1 }
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello")),
+        }
     );
 
     let (_, joined) = Client::connect(addr, "notes", 2).await;
@@ -197,12 +268,20 @@ async fn reconnecting_client_replays_missed_ops() {
     b.send_op(0, Op::insert(2, 0, "hello")).await;
     assert_eq!(
         b.next_server_message().await,
-        ServerMessage::Ack { version: 1 }
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(2, 0, "hello")),
+        }
     );
     b.send_op(1, Op::insert(2, 5, " world")).await;
     assert_eq!(
         b.next_server_message().await,
-        ServerMessage::Ack { version: 2 }
+        ServerMessage::Ack {
+            version: 2,
+            seq: 2,
+            op: Some(Op::insert(2, 5, " world")),
+        }
     );
 
     // A reconnects, joins (full text, version 2), then asks for just
@@ -246,7 +325,11 @@ async fn room_survives_a_server_restart() {
         a.send_op(0, Op::insert(1, 0, "hello")).await;
         assert_eq!(
             a.next_server_message().await,
-            ServerMessage::Ack { version: 1 }
+            ServerMessage::Ack {
+                version: 1,
+                seq: 1,
+                op: Some(Op::insert(1, 0, "hello")),
+            }
         );
     }
     server.abort();
@@ -279,7 +362,11 @@ async fn sync_from_before_the_snapshot_gets_the_whole_document() {
             a.send_op(i, Op::insert(1, i, "x")).await;
             assert_eq!(
                 a.next_server_message().await,
-                ServerMessage::Ack { version: i + 1 }
+                ServerMessage::Ack {
+                    version: i + 1,
+                    seq: (i + 1) as u64,
+                    op: Some(Op::insert(1, i, "x")),
+                }
             );
         }
     }
@@ -329,7 +416,11 @@ async fn presence_update_reaches_the_other_client() {
     a.send_op(0, Op::insert(1, 0, "hello world")).await;
     assert_eq!(
         a.next_server_message().await,
-        ServerMessage::Ack { version: 1 }
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello world")),
+        }
     );
     assert_eq!(
         b.next_server_message().await,
@@ -412,7 +503,11 @@ async fn cursor_shifts_when_another_client_inserts_before_it() {
     a.send_op(0, Op::insert(1, 0, "hello")).await;
     assert_eq!(
         a.next_server_message().await,
-        ServerMessage::Ack { version: 1 }
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello")),
+        }
     );
     assert_eq!(
         b.next_server_message().await,
@@ -444,7 +539,11 @@ async fn cursor_shifts_when_another_client_inserts_before_it() {
     b.send_op(1, Op::insert(2, 0, ">> ")).await;
     assert_eq!(
         b.next_server_message().await,
-        ServerMessage::Ack { version: 2 }
+        ServerMessage::Ack {
+            version: 2,
+            seq: 1,
+            op: Some(Op::insert(2, 0, ">> ")),
+        }
     );
     assert_eq!(
         a.next_server_message().await,

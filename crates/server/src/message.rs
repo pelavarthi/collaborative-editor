@@ -20,7 +20,10 @@ pub enum ClientMessage {
         name: Option<String>,
     },
     /// An edit made against the document as it was at `base_version`.
-    Op { base_version: usize, op: Op },
+    /// `seq` counts this client's ops from 1 up, so a resend after a
+    /// lost ack carries the same number and the server can tell it
+    /// apart from a new edit.
+    Op { base_version: usize, seq: u64, op: Op },
     /// A reconnecting client asking for the ops it missed since
     /// `base_version`, so it can catch up without taking a full copy.
     Sync { base_version: usize },
@@ -48,7 +51,17 @@ pub enum ServerMessage {
     /// An op from another client, already transformed and applied.
     Op { version: usize, op: Op },
     /// The server applied this client's op; `version` is the new version.
-    Ack { version: usize },
+    /// `seq` echoes the op's number, so the client knows which of its
+    /// queued ops this ack is for. `op` is the op as applied (after
+    /// transforming it past anything the client had not seen): the
+    /// client applies it when its own echo was wiped by a rejoin, and
+    /// ignores it when the op is already in its text. `None` means the
+    /// op transformed into a no-op and changed nothing.
+    Ack {
+        version: usize,
+        seq: u64,
+        op: Option<Op>,
+    },
     /// The ops a syncing client missed, starting at `from_version`.
     /// Applying them in order brings it up to date.
     Ops { from_version: usize, ops: Vec<Op> },
