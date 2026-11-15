@@ -2,12 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   applyOp,
+  applyOpWithAttrs,
   chars,
   diffToOps,
   EditorState,
   shiftPosition,
+  spansOf,
 } from "../editor.js";
-import { deleteOp, insertOp } from "../protocol.js";
+import { deleteOp, formatOp, insertOp, plainAttrs } from "../protocol.js";
 
 test("diff of typing at the end is one insert", () => {
   assert.deepEqual(diffToOps("", "hello", 1), [insertOp(1, 0, "hello")]);
@@ -84,4 +86,92 @@ test("replace takes a snapshot wholesale", () => {
   state.replace("brand new text", 9);
   assert.equal(state.text, "brand new text");
   assert.equal(state.version, 9);
+});
+
+test("formatRange bolds a selection and returns the op to send", () => {
+  const state = new EditorState(1);
+  state.localEdit("hello world");
+  const op = state.formatRange(0, 5, { bold: true });
+  assert.deepEqual(op, formatOp(1, 0, 5, { bold: true }));
+  assert.deepEqual(state.spans(), [
+    { text: "hello", attrs: { bold: true, italic: false, link: null } },
+    { text: " world", attrs: plainAttrs() },
+  ]);
+  // Toggling it off again restores plain text.
+  state.formatRange(0, 5, { bold: false });
+  assert.deepEqual(state.spans(), [{ text: "hello world", attrs: plainAttrs() }]);
+});
+
+test("formatRange of nothing returns null", () => {
+  const state = new EditorState(1);
+  state.localEdit("hello");
+  assert.equal(state.formatRange(2, 0, { bold: true }), null);
+  assert.equal(state.formatRange(0, 5, {}), null);
+  assert.equal(state.text, "hello");
+});
+
+test("a link is set and removed by a format op", () => {
+  const state = new EditorState(1);
+  state.localEdit("click here");
+  state.formatRange(0, 5, { link: "https://example.com" });
+  assert.equal(state.attrs[0]?.link, "https://example.com");
+  assert.equal(state.attrs[6]?.link, null);
+  state.formatRange(0, 5, { link: null });
+  assert.ok(state.attrs.every((a) => a.link === null));
+});
+
+test("typing inside a bold run inherits the bold", () => {
+  const state = new EditorState(1);
+  state.localEdit("hello");
+  state.formatRange(0, 5, { bold: true });
+  const ops = state.localEdit("hello!");
+  assert.deepEqual(ops, [insertOp(1, 5, "!", { bold: true, italic: false, link: null })]);
+  assert.ok(state.attrs[5]?.bold);
+  // Typing at the start of plain text stays plain.
+  const plain = new EditorState(1);
+  plain.localEdit("hi");
+  assert.deepEqual(plain.localEdit("!hi"), [insertOp(1, 0, "!")]);
+});
+
+test("applyOpWithAttrs formats without touching the text", () => {
+  const bold = { bold: true, italic: false, link: null };
+  const doc = applyOpWithAttrs("hello world", [...Array(11)].map(() => plainAttrs()), formatOp(2, 6, 5, { italic: true }));
+  assert.equal(doc.text, "hello world");
+  assert.deepEqual(doc.attrs.slice(0, 6), [...Array(6)].map(() => plainAttrs()));
+  assert.ok(doc.attrs.slice(6).every((a) => a.italic && !a.bold));
+  assert.equal(applyOp("hello", formatOp(2, 0, 5, { bold: true })), "hello");
+  assert.throws(
+    () => applyOpWithAttrs("hi", [plainAttrs(), plainAttrs()], formatOp(2, 1, 2, { bold: true })),
+    /past end/,
+  );
+  assert.deepEqual(spansOf("aab", [bold, bold, plainAttrs()]), [
+    { text: "aa", attrs: bold },
+    { text: "b", attrs: plainAttrs() },
+  ]);
+});
+
+test("replace takes the formatting with the text", () => {
+  const state = new EditorState(1);
+  state.localEdit("old");
+  const bold = { bold: true, italic: false, link: null };
+  state.replace("new text", 9, [bold, bold, bold, plainAttrs(), plainAttrs(), plainAttrs(), plainAttrs(), plainAttrs()]);
+  assert.equal(state.text, "new text");
+  assert.equal(state.attrs[0]?.bold, true);
+  assert.equal(state.attrs[3]?.bold, false);
+  // A join without formatting reads as plain text.
+  state.replace("plain", 10);
+  assert.ok(state.attrs.every((a) => !a.bold && !a.italic && a.link === null));
+});
+
+test("shiftPosition ignores a format op", () => {
+  assert.equal(shiftPosition(4, formatOp(1, 0, 5, { bold: true })), 4);
+});
+
+test("a remote format lands on the local text", () => {
+  const state = new EditorState(1);
+  state.localEdit("hello");
+  state.applyRemote(formatOp(2, 0, 5, { bold: true }), 2);
+  assert.deepEqual(state.spans(), [
+    { text: "hello", attrs: { bold: true, italic: false, link: null } },
+  ]);
 });

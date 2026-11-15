@@ -183,6 +183,8 @@ fn shift_pos(pos: usize, op: &Op) -> usize {
                 pos - len
             }
         }
+        // Formatting never moves text, so a cursor stays where it is.
+        Op::Format { .. } => pos,
     }
 }
 
@@ -285,6 +287,20 @@ mod tests {
         let moved = map.shift_for_op(&Op::delete(1, 3, 4));
         assert_eq!(moved[0].cursor, 3);
         assert_eq!(moved[0].selection, Some(Selection::new(2, 3)));
+    }
+
+    #[test]
+    fn formatting_does_not_move_any_cursor() {
+        use collab_ot::FormatChange;
+
+        let mut map = PresenceMap::new();
+        map.join(1, None);
+        map.join(2, None);
+        map.update(2, 4, Some(Selection::new(2, 6)), 10);
+        assert!(map
+            .shift_for_op(&Op::format(1, 0, 10, FormatChange::bold(true)))
+            .is_empty());
+        assert_eq!(map.all()[1].cursor, 4);
     }
 
     #[test]

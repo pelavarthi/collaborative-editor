@@ -1,6 +1,6 @@
 //! Two real WebSocket clients talking to a real server on a local port.
 
-use collab_ot::Op;
+use collab_ot::{Attrs, Op};
 use collab_server::message::{ClientMessage, ServerMessage};
 use collab_server::presence::{color_for, Presence, Selection};
 use collab_server::serve_with_data_dir;
@@ -250,6 +250,7 @@ async fn late_joiner_gets_current_text() {
         ServerMessage::Joined {
             room: "notes".to_string(),
             text: "hello".to_string(),
+            attrs: vec![Attrs::plain(); 5],
             version: 1,
             // Client 1 was already here, caret still at the start.
             presences: vec![presence(1, None)],
@@ -292,6 +293,7 @@ async fn reconnecting_client_replays_missed_ops() {
         ServerMessage::Joined {
             room: "notes".to_string(),
             text: "hello world".to_string(),
+            attrs: vec![Attrs::plain(); 11],
             version: 2,
             // Client 2 kept typing while A was away.
             presences: vec![presence(2, None)],
@@ -344,6 +346,7 @@ async fn room_survives_a_server_restart() {
         ServerMessage::Joined {
             room: "notes".to_string(),
             text: "hello".to_string(),
+            attrs: vec![Attrs::plain(); 5],
             version: 1,
             // Presence is not saved to disk: a restart clears the room.
             presences: vec![],
@@ -382,6 +385,7 @@ async fn sync_from_before_the_snapshot_gets_the_whole_document() {
         ServerMessage::Joined {
             room: "notes".to_string(),
             text: "x".repeat(51),
+            attrs: vec![Attrs::plain(); 51],
             version: 51,
             presences: vec![],
         }
@@ -391,6 +395,7 @@ async fn sync_from_before_the_snapshot_gets_the_whole_document() {
         a.next_server_message().await,
         ServerMessage::Snapshot {
             text: "x".repeat(51),
+            attrs: vec![Attrs::plain(); 51],
             version: 51,
         }
     );
@@ -463,6 +468,7 @@ async fn joiner_sees_who_is_here_and_the_room_sees_the_joiner() {
         ServerMessage::Joined {
             room: "room1".to_string(),
             text: String::new(),
+            attrs: vec![],
             version: 0,
             presences: vec![presence(1, Some("pranav"))],
         }
@@ -573,5 +579,70 @@ async fn presence_past_the_end_of_the_document_is_clamped() {
     assert_eq!(
         b.next_raw_message().await,
         ServerMessage::Presence { presence: clamped }
+    );
+}
+
+#[tokio::test]
+async fn formatting_reaches_the_other_client_and_a_late_joiner() {
+    use collab_ot::FormatChange;
+
+    let (addr, _server, _dir) = start_server().await;
+    let (mut a, _) = Client::connect(addr, "rich", 1).await;
+    let (mut b, _) = Client::connect(addr, "rich", 2).await;
+
+    a.send_op(0, Op::insert(1, 0, "hello world")).await;
+    assert_eq!(
+        a.next_server_message().await,
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello world")),
+        }
+    );
+    assert_eq!(
+        b.next_server_message().await,
+        ServerMessage::Op {
+            version: 1,
+            op: Op::insert(1, 0, "hello world"),
+        }
+    );
+
+    // A bolds "hello": B gets the format op, and the text is unchanged.
+    let bold = Op::format(1, 0, 5, FormatChange::bold(true));
+    a.send_op(1, bold.clone()).await;
+    assert_eq!(
+        a.next_server_message().await,
+        ServerMessage::Ack {
+            version: 2,
+            seq: 2,
+            op: Some(bold.clone()),
+        }
+    );
+    assert_eq!(
+        b.next_server_message().await,
+        ServerMessage::Op {
+            version: 2,
+            op: bold,
+        }
+    );
+
+    // A client that joins now gets the bold with the text.
+    let (_, joined) = Client::connect(addr, "rich", 3).await;
+    let mut attrs = vec![Attrs::plain(); 11];
+    for attr in attrs.iter_mut().take(5) {
+        *attr = Attrs::bold();
+    }
+    // B's cursor moved to the end of the text when A's insert landed.
+    let mut b_presence = presence(2, None);
+    b_presence.cursor = 11;
+    assert_eq!(
+        joined,
+        ServerMessage::Joined {
+            room: "rich".to_string(),
+            text: "hello world".to_string(),
+            attrs,
+            version: 2,
+            presences: vec![presence(1, None), b_presence],
+        }
     );
 }

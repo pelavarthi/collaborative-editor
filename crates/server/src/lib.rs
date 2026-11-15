@@ -100,7 +100,11 @@ impl RoomState {
         }
         self.ops_since_snapshot += 1;
         if self.ops_since_snapshot >= SNAPSHOT_EVERY {
-            if let Err(err) = self.store.save_snapshot(version, self.room.text()) {
+            if let Err(err) = self.store.save_snapshot(
+                version,
+                self.room.text(),
+                self.room.attrs(),
+            ) {
                 eprintln!("could not save snapshot at version {version}: {err}");
                 return;
             }
@@ -185,6 +189,7 @@ async fn handle_connection(
                 let joined = ServerMessage::Joined {
                     room: room.clone(),
                     text: state.room.text().to_string(),
+                    attrs: state.room.attrs().to_vec(),
                     version: state.room.version(),
                     presences: state.presence.all(),
                 };
@@ -320,6 +325,7 @@ async fn handle_message(
                 // Too far behind to replay: send the whole document.
                 None => Some(ServerMessage::Snapshot {
                     text: room.text().to_string(),
+                    attrs: room.attrs().to_vec(),
                     version: room.version(),
                 }),
             }

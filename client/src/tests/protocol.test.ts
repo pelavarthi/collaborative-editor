@@ -4,6 +4,7 @@ import {
   decodeServer,
   deleteOp,
   encodeClient,
+  formatOp,
   insertOp,
   isNoop,
   opSite,
@@ -119,4 +120,86 @@ test("op helpers", () => {
   assert.equal(isNoop(insertOp(1, 0, "")), true);
   assert.equal(isNoop(deleteOp(1, 0, 0)), true);
   assert.equal(isNoop(insertOp(1, 0, "x")), false);
+});
+
+test("format op encodes with the Rust externally-tagged shape", () => {
+  assert.equal(
+    encodeClient({ type: "op", base_version: 3, seq: 2, op: formatOp(1, 0, 5, { bold: true }) }),
+    '{"type":"op","base_version":3,"seq":2,"op":{"Format":{"site":1,"pos":0,"len":5,"change":{"bold":true}}}}',
+  );
+  // Removing a link sends an explicit null; leaving it alone omits it.
+  assert.equal(
+    encodeClient({ type: "op", base_version: 3, seq: 2, op: formatOp(1, 0, 5, { link: null }) }),
+    '{"type":"op","base_version":3,"seq":2,"op":{"Format":{"site":1,"pos":0,"len":5,"change":{"link":null}}}}',
+  );
+  assert.equal(
+    encodeClient({ type: "op", base_version: 3, seq: 2, op: formatOp(1, 0, 5, { italic: true }) }),
+    '{"type":"op","base_version":3,"seq":2,"op":{"Format":{"site":1,"pos":0,"len":5,"change":{"italic":true}}}}',
+  );
+});
+
+test("a styled insert carries its attributes, a plain one does not", () => {
+  assert.equal(
+    encodeClient({
+      type: "op",
+      base_version: 0,
+      seq: 1,
+      op: insertOp(1, 0, "hi", { bold: true, italic: false, link: null }),
+    }),
+    '{"type":"op","base_version":0,"seq":1,"op":{"Insert":{"site":1,"pos":0,"text":"hi","attrs":{"bold":true,"italic":false,"link":null}}}}',
+  );
+  assert.deepEqual(
+    decodeServer(
+      '{"type":"op","version":2,"op":{"Format":{"site":2,"pos":0,"len":5,"change":{"bold":true}}}}',
+    ),
+    { type: "op", version: 2, op: formatOp(2, 0, 5, { bold: true }) },
+  );
+  // An insert without attrs reads as plain text.
+  assert.deepEqual(
+    decodeServer('{"type":"op","version":2,"op":{"Insert":{"site":2,"pos":0,"text":"x"}}}'),
+    { type: "op", version: 2, op: insertOp(2, 0, "x") },
+  );
+});
+
+test("decode joined and snapshot carry the formatting", () => {
+  const joined = decodeServer(
+    '{"type":"joined","room":"notes","text":"hi","attrs":[{"bold":true,"italic":false,"link":null},{"bold":false,"italic":false,"link":null}],"version":3,"presences":[]}',
+  );
+  assert.equal(joined.type, "joined");
+  if (joined.type === "joined") {
+    assert.deepEqual(joined.attrs, [
+      { bold: true, italic: false, link: null },
+      { bold: false, italic: false, link: null },
+    ]);
+  }
+  const snapshot = decodeServer(
+    '{"type":"snapshot","text":"hi","attrs":[{"bold":false,"italic":true,"link":null},{"bold":false,"italic":false,"link":null}],"version":9}',
+  );
+  assert.equal(snapshot.type, "snapshot");
+  if (snapshot.type === "snapshot") {
+    assert.equal(snapshot.attrs?.[0]?.italic, true);
+  }
+  // Messages without attrs still decode: an old server sends none.
+  assert.deepEqual(decodeServer('{"type":"snapshot","text":"hi","version":9}'), {
+    type: "snapshot",
+    text: "hi",
+    version: 9,
+  });
+});
+
+test("decode rejects a malformed format op", () => {
+  assert.throws(
+    () => decodeServer('{"type":"op","version":1,"op":{"Format":{"site":1,"pos":0,"len":5,"change":{"bold":"yes"}}}}'),
+    /not a server message/,
+  );
+  assert.throws(
+    () => decodeServer('{"type":"op","version":1,"op":{"Format":{"site":1,"pos":0,"len":5}}}'),
+    /not a server message/,
+  );
+});
+
+test("op helpers cover formats", () => {
+  assert.equal(opSite(formatOp(4, 0, 2, { bold: true })), 4);
+  assert.equal(isNoop(formatOp(1, 0, 0, { bold: true })), true);
+  assert.equal(isNoop(formatOp(1, 0, 2, { bold: true })), false);
 });

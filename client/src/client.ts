@@ -17,6 +17,7 @@ import {
   decodeServer,
   encodeClient,
   type ClientMessage,
+  type FormatChange,
   type Op,
   type Presence,
   type Selection,
@@ -146,6 +147,25 @@ export class CollabClient {
     if (ops.length > 0) this.onChange({ kind: "local", ops });
   }
 
+  /**
+   * Formats a range: bold, italic, or a link. Echoes it locally at
+   * once like a keystroke, then queues the op for the server. An empty
+   * range or a change that touches nothing sends nothing.
+   */
+  formatRange(pos: number, len: number, change: FormatChange): void {
+    const op = this.editor.formatRange(pos, len, change);
+    if (op === null) return;
+    this.pending.push({
+      seq: this.nextSeq++,
+      op,
+      baseVersion: this.editor.version,
+      echoed: true,
+      sent: false,
+    });
+    this.flush();
+    this.onChange({ kind: "local", ops: [op] });
+  }
+
   /** Reports where this client's caret is and what it has highlighted. */
   sendPresence(cursor: number, selection: Selection | null): void {
     this.send({ type: "presence", cursor, selection });
@@ -257,7 +277,7 @@ export class CollabClient {
   private handleMessage(msg: ServerMessage): void {
     switch (msg.type) {
       case "joined":
-        this.editor.replace(msg.text, msg.version);
+        this.editor.replace(msg.text, msg.version, msg.attrs);
         this.presences = new Map(msg.presences.map((p) => [p.client_id, p]));
         this.status = "connected";
         this.reconnectAttempt = 0;
@@ -312,7 +332,7 @@ export class CollabClient {
         break;
       }
       case "snapshot":
-        this.editor.replace(msg.text, msg.version);
+        this.editor.replace(msg.text, msg.version, msg.attrs);
         this.onChange({ kind: "remote" });
         break;
       case "presence":

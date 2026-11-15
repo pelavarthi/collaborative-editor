@@ -135,3 +135,40 @@ test(
     assert.match(a.editor.text, /hello world[?!][?!]/);
   },
 );
+
+test(
+  "formatting travels between clients",
+  { skip: !existsSync(serverBin) },
+  async (t) => {
+    const { proc, addr, dir } = await startServer();
+    t.after(() => {
+      proc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    const a = await connectClient(1, addr, "rich-text");
+    const b = await connectClient(2, addr, "rich-text");
+    t.after(() => {
+      a.close();
+      b.close();
+    });
+
+    a.localEdit("hello world");
+    await waitFor("B to receive hello world", () => b.editor.text === "hello world");
+    await waitFor("A's edit to be acked", () => a.pendingCount === 0);
+
+    // A bolds "hello": B sees the bold without the text changing.
+    a.formatRange(0, 5, { bold: true });
+    await waitFor("B to see the bold", () => b.editor.attrs[0]?.bold === true);
+    assert.equal(b.editor.attrs[4]?.bold, true);
+    assert.equal(b.editor.attrs[5]?.bold, false);
+    assert.equal(a.editor.attrs[0]?.bold, true);
+
+    // A late joiner gets the bold with the text.
+    const c = await connectClient(3, addr, "rich-text");
+    t.after(() => c.close());
+    assert.equal(c.editor.text, "hello world");
+    assert.equal(c.editor.attrs[0]?.bold, true);
+    assert.equal(c.editor.attrs[5]?.bold, false);
+  },
+);

@@ -23,6 +23,7 @@
 // the client sends it like any other edit, and it is logged,
 // broadcast, and persisted as usual.
 
+use crate::attrs::FormatChange;
 use crate::document::Document;
 use crate::op::Op;
 use crate::transform::transform;
@@ -176,16 +177,40 @@ impl History {
 
 /// The op that exactly reverses `op`: an insert becomes a delete of the
 /// same text, a delete becomes an insert of the text it removed, which
-/// has to be read out of the document before the delete runs.
+/// has to be read out of the document before the delete runs. A format
+/// becomes a format that puts the old attributes back — but only when
+/// the range was uniformly formatted before, since one op can only
+/// carry one set of attributes. A format over mixed attributes has no
+/// single inverse, so it is not undoable: `record` skips ops without
+/// an inverse, and such a format simply never reaches the undo stack.
 fn inverse(op: &Op, before: &Document) -> Option<Op> {
     match op {
-        Op::Insert { site, pos, text } => Some(Op::delete(*site, *pos, text.chars().count())),
+        Op::Insert { site, pos, text, .. } => {
+            Some(Op::delete(*site, *pos, text.chars().count()))
+        }
         Op::Delete { site, pos, len } => {
             let text: String = before.text().chars().skip(*pos).take(*len).collect();
             if text.chars().count() != *len {
                 return None;
             }
             Some(Op::insert(*site, *pos, text))
+        }
+        Op::Format { site, pos, len, .. } => {
+            let first = before.attrs().get(*pos)?;
+            if (0..*len).all(|i| before.attrs().get(pos + i) == Some(first)) {
+                Some(Op::format(
+                    *site,
+                    *pos,
+                    *len,
+                    FormatChange {
+                        bold: Some(first.bold),
+                        italic: Some(first.italic),
+                        link: Some(first.link.clone()),
+                    },
+                ))
+            } else {
+                None
+            }
         }
     }
 }
@@ -220,6 +245,38 @@ mod tests {
         let mut history = History::new();
         let doc = Document::from_text("abc");
         history.record(&Op::insert(1, 0, ""), &doc);
+        assert!(!history.can_undo());
+    }
+
+    #[test]
+    fn undo_of_a_format_restores_the_old_attributes() {
+        use crate::attrs::FormatChange;
+
+        let mut doc = Document::from_text("hello");
+        let mut history = History::new();
+        let fmt = Op::format(1, 0, 5, FormatChange::bold(true));
+        history.record(&fmt, &doc);
+        doc.apply(&fmt).unwrap();
+        assert!(doc.attrs().iter().all(|a| a.bold));
+
+        let undone = history.undo(&doc).unwrap();
+        doc.apply(&undone).unwrap();
+        assert!(doc.attrs().iter().all(|a| a.is_plain()));
+
+        let redone = history.redo(&doc).unwrap();
+        doc.apply(&redone).unwrap();
+        assert!(doc.attrs().iter().all(|a| a.bold));
+    }
+
+    #[test]
+    fn format_over_mixed_attributes_is_not_undoable() {
+        use crate::attrs::FormatChange;
+
+        let mut doc = Document::from_text("hello");
+        doc.apply(&Op::format(1, 0, 2, FormatChange::italic(true)))
+            .unwrap();
+        let mut history = History::new();
+        history.record(&Op::format(1, 0, 5, FormatChange::bold(true)), &doc);
         assert!(!history.can_undo());
     }
 }

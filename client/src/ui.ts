@@ -3,6 +3,11 @@
 // the caret on the same text, and everyone else's cursor shows up in the
 // presence list with their colour.
 //
+// The textarea shows plain text, so formatting is applied from the
+// toolbar and shown in a read-only preview below it: the preview renders
+// the document's spans as bold, italic, and links, built with DOM calls
+// so document text never becomes HTML.
+//
 // The textarea counts caret positions in UTF-16 units; the protocol
 // counts characters (code points), so the caret is converted both ways.
 
@@ -39,7 +44,39 @@ export function bindEditor(
   statusEl: HTMLElement,
   presenceEl: HTMLElement,
   client: CollabClient,
+  formatBar: HTMLElement,
+  previewEl: HTMLElement,
 ): void {
+  const renderPreview = () => {
+    previewEl.innerHTML = "";
+    for (const span of client.editor.spans()) {
+      let node: Node = document.createTextNode(span.text);
+      if (span.attrs.italic) {
+        const em = document.createElement("em");
+        em.appendChild(node);
+        node = em;
+      }
+      if (span.attrs.bold) {
+        const strong = document.createElement("strong");
+        strong.appendChild(node);
+        node = strong;
+      }
+      if (span.attrs.link !== null && /^https?:\/\//.test(span.attrs.link)) {
+        const link = document.createElement("a");
+        link.href = span.attrs.link;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.appendChild(node);
+        node = link;
+      }
+      const wrapper = document.createElement("span");
+      wrapper.appendChild(node);
+      previewEl.appendChild(wrapper);
+    }
+    if (client.editor.text === "") {
+      previewEl.textContent = "Nothing here yet — type above, then bold it, italicize it, or link it.";
+    }
+  };
   const renderPresence = () => {
     const others = [...client.presences.values()].sort((a, b) => a.client_id - b.client_id);
     presenceEl.innerHTML = "";
@@ -79,7 +116,44 @@ export function bindEditor(
   const renderAll = () => {
     renderStatus();
     renderPresence();
+    renderPreview();
   };
+
+  /** The highlighted range in code-point positions, or null when the
+   * selection is empty: formatting needs something to format. */
+  const selectionRange = (): { start: number; end: number } | null => {
+    const start = unitsToCodePoints(area.value, area.selectionStart ?? 0);
+    const end = unitsToCodePoints(area.value, area.selectionEnd ?? 0);
+    if (start === end) return null;
+    return { start, end };
+  };
+
+  const toggleAttr = (which: "bold" | "italic") => {
+    const range = selectionRange();
+    if (range === null) return;
+    const all = client.editor.attrs
+      .slice(range.start, range.end)
+      .every((a) => a[which]);
+    client.formatRange(range.start, range.end - range.start, { [which]: !all });
+    area.focus();
+  };
+
+  const setLink = () => {
+    const range = selectionRange();
+    if (range === null) return;
+    const current = client.editor.attrs[range.start]?.link ?? "";
+    const url = window.prompt("Link URL (empty to remove the link):", current || "https://");
+    if (url === null) return;
+    const trimmed = url.trim();
+    client.formatRange(range.start, range.end - range.start, {
+      link: trimmed === "" ? null : trimmed,
+    });
+    area.focus();
+  };
+
+  formatBar.querySelector("#boldBtn")?.addEventListener("click", () => toggleAttr("bold"));
+  formatBar.querySelector("#italicBtn")?.addEventListener("click", () => toggleAttr("italic"));
+  formatBar.querySelector("#linkBtn")?.addEventListener("click", setLink);
 
   const reportCaret = () => {
     if (client.status !== "connected") return;

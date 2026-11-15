@@ -7,7 +7,7 @@
 // broadcasts the transformed op, so every client ends up applying the
 // same ops in the same order.
 
-use collab_ot::{transform, Document, Op};
+use collab_ot::{transform, Attrs, Document, Op};
 
 #[derive(Debug, Default)]
 pub struct Room {
@@ -33,6 +33,12 @@ impl Room {
 
     pub fn text(&self) -> &str {
         self.doc.text()
+    }
+
+    /// The formatting of each character, in order. A client that joins
+    /// needs this with the text, or its copy would lose the bold.
+    pub fn attrs(&self) -> &[Attrs] {
+        self.doc.attrs()
     }
 
     pub fn version(&self) -> usize {

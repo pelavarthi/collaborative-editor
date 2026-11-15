@@ -7,6 +7,11 @@
     <style>
       body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 720px; padding: 0 1rem; }
       #editor { width: 100%; height: 320px; font: 1rem/1.5 monospace; padding: 0.75rem; box-sizing: border-box; }
+      #formatbar { margin: 0.5rem 0; }
+      #formatbar button { padding: 0.3rem 0.7rem; margin-right: 0.4rem; font-size: 1rem; cursor: pointer; }
+      #preview { border: 1px solid #ddd; border-radius: 4px; padding: 0.75rem; margin: 0.5rem 0; min-height: 3rem; white-space: pre-wrap; line-height: 1.5; }
+      #preview a { color: #0090ff; }
+      #preview:empty::before { content: "Nothing here yet."; color: #999; }
       #status { color: #555; margin: 0.5rem 0; }
       #presence { margin: 0.5rem 0; }
       .peer { margin: 0.2rem 0; }
@@ -22,7 +27,13 @@
       <label>Name <input id="name" name="name" placeholder="your name" /></label>
       <button type="submit">Join</button>
     </form>
+    <div id="formatbar">
+      <button id="boldBtn" type="button" title="Bold the selection"><b>B</b></button>
+      <button id="italicBtn" type="button" title="Italicize the selection"><i>I</i></button>
+      <button id="linkBtn" type="button" title="Link the selection">Link</button>
+    </div>
     <textarea id="editor" placeholder="Start typing — everyone in the room sees it live."></textarea>
+    <div id="preview" aria-label="Formatted preview"></div>
     <p id="status">connecting…</p>
     <div id="presence"></div>
     <script type="module" src="./dist/main.js"></script>

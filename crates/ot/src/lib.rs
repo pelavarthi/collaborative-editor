@@ -5,12 +5,16 @@
 //! sites that edit at the same time still land on the same document.
 //! Day 6: undo and redo — the inverse of an edit, transformed past
 //! everything applied since, so it still undoes the right text.
+//! Day 9: rich text — bold, italic, and links as per-character
+//! attributes, with a format op that changes a range of them.
 
+pub mod attrs;
 pub mod document;
 pub mod history;
 pub mod op;
 pub mod transform;
 
+pub use attrs::{Attrs, FormatChange};
 pub use document::{Document, OpError};
 pub use history::History;
 pub use op::Op;

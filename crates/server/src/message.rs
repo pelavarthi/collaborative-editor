@@ -2,7 +2,7 @@
 //! WebSocket. Every message is one text frame carrying one JSON object.
 
 use crate::presence::{Presence, Selection};
-use collab_ot::Op;
+use collab_ot::{Attrs, Op};
 use serde::{Deserialize, Serialize};
 
 /// A message a client sends to the server.
@@ -41,10 +41,14 @@ pub enum ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
     /// Sent right after joining: the room's current text and version,
-    /// plus who else is already here.
+    /// plus who else is already here. `attrs` is the formatting of
+    /// each character, in order; without it a joining client would
+    /// see the text but lose the bold.
     Joined {
         room: String,
         text: String,
+        #[serde(default)]
+        attrs: Vec<Attrs>,
         version: usize,
         presences: Vec<Presence>,
     },
@@ -67,7 +71,13 @@ pub enum ServerMessage {
     Ops { from_version: usize, ops: Vec<Op> },
     /// The answer to a sync when the client's version is older than the
     /// ops the server still keeps: take the whole document instead.
-    Snapshot { text: String, version: usize },
+    /// `attrs` carries the formatting, for the same reason as in Joined.
+    Snapshot {
+        text: String,
+        #[serde(default)]
+        attrs: Vec<Attrs>,
+        version: usize,
+    },
     /// One client's presence changed: a join, a moved caret, or a new
     /// selection. The sender never gets its own presence back.
     Presence { presence: Presence },

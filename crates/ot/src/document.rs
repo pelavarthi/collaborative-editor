@@ -1,16 +1,28 @@
-// A document is just its text. Positions count characters, not bytes,
-// so one emoji is one position even though it takes four bytes in UTF-8.
-// That is what an editor cursor sees, so ops use the same counting.
+// A document is its text plus one set of attributes per character.
+// Positions count characters, not bytes, so one emoji is one position
+// even though it takes four bytes in UTF-8. That is what an editor
+// cursor sees, so ops use the same counting.
+//
+// The attributes live in a vector parallel to the text: `attrs[i]` is
+// the formatting of the i-th character. An insert splices attributes
+// in with the text, a delete takes both out, and a format op rewrites
+// the attributes of a range without touching the text.
 //
 // The text is a plain String for now. A rope would make big edits faster,
 // but it is not needed until documents get large.
 
+use crate::attrs::Attrs;
 use crate::op::Op;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Document {
     text: String,
+    attrs: Vec<Attrs>,
 }
+
+/// One run of equally formatted text, for rendering: the text and the
+/// attributes every character in it shares.
+pub type Span = (String, Attrs);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpError {
@@ -19,6 +31,11 @@ pub enum OpError {
         doc_len: usize,
     },
     DeleteOutOfBounds {
+        pos: usize,
+        len: usize,
+        doc_len: usize,
+    },
+    FormatOutOfBounds {
         pos: usize,
         len: usize,
         doc_len: usize,
@@ -37,6 +54,12 @@ impl std::fmt::Display for OpError {
                     "delete of {len} chars at {pos} past end of document ({doc_len} chars)"
                 )
             }
+            OpError::FormatOutOfBounds { pos, len, doc_len } => {
+                write!(
+                    f,
+                    "format of {len} chars at {pos} past end of document ({doc_len} chars)"
+                )
+            }
         }
     }
 }
@@ -49,13 +72,47 @@ impl Document {
     }
 
     pub fn from_text(text: &str) -> Self {
+        let attrs = vec![Attrs::plain(); text.chars().count()];
         Self {
             text: text.to_string(),
+            attrs,
+        }
+    }
+
+    /// Rebuilds a document from text and per-character attributes, as
+    /// a snapshot stores them. A short attribute list is padded with
+    /// plain attributes; a long one is cut to the text.
+    pub fn from_parts(text: &str, attrs: Vec<Attrs>) -> Self {
+        let mut attrs = attrs;
+        let len = text.chars().count();
+        attrs.truncate(len);
+        attrs.resize_with(len, Attrs::plain);
+        Self {
+            text: text.to_string(),
+            attrs,
         }
     }
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// The formatting of each character, in order.
+    pub fn attrs(&self) -> &[Attrs] {
+        &self.attrs
+    }
+
+    /// The text as runs of equally formatted characters, for rendering.
+    /// An empty document has no spans; plain text is one span.
+    pub fn spans(&self) -> Vec<Span> {
+        let mut spans: Vec<Span> = Vec::new();
+        for (ch, attrs) in self.text.chars().zip(self.attrs.iter()) {
+            match spans.last_mut() {
+                Some((text, last)) if *last == *attrs => text.push(ch),
+                _ => spans.push((ch.to_string(), attrs.clone())),
+            }
+        }
+        spans
     }
 
     /// Length in characters.
@@ -71,12 +128,17 @@ impl Document {
     /// A failed apply leaves the document unchanged.
     pub fn apply(&mut self, op: &Op) -> Result<(), OpError> {
         match op {
-            Op::Insert { pos, text, .. } => {
+            Op::Insert {
+                pos, text, attrs, ..
+            } => {
                 let byte = self.char_to_byte(*pos).ok_or(OpError::InsertOutOfBounds {
                     pos: *pos,
                     doc_len: self.len(),
                 })?;
                 self.text.insert_str(byte, text);
+                let inserted: Vec<Attrs> =
+                    vec![attrs.clone(); text.chars().count()];
+                self.attrs.splice(*pos..*pos, inserted);
                 Ok(())
             }
             Op::Delete { pos, len, .. } => {
@@ -93,6 +155,25 @@ impl Document {
                         doc_len: self.len(),
                     })?;
                 self.text.replace_range(start..end, "");
+                self.attrs.drain(*pos..*pos + *len);
+                Ok(())
+            }
+            Op::Format {
+                pos,
+                len,
+                change,
+                ..
+            } => {
+                if pos + len > self.len() {
+                    return Err(OpError::FormatOutOfBounds {
+                        pos: *pos,
+                        len: *len,
+                        doc_len: self.len(),
+                    });
+                }
+                for attrs in &mut self.attrs[*pos..*pos + *len] {
+                    *attrs = change.apply_to(attrs);
+                }
                 Ok(())
             }
         }
@@ -111,6 +192,7 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::attrs::FormatChange;
 
     #[test]
     fn insert_at_start_middle_and_end() {
@@ -186,5 +268,106 @@ mod tests {
         doc.apply(&Op::insert(1, 1, "")).unwrap();
         doc.apply(&Op::delete(1, 1, 0)).unwrap();
         assert_eq!(doc.text(), "abc");
+    }
+
+    #[test]
+    fn format_bolds_a_range_and_leaves_the_rest_plain() {
+        let mut doc = Document::from_text("hello world");
+        doc.apply(&Op::format(1, 0, 5, FormatChange::bold(true)))
+            .unwrap();
+        assert_eq!(doc.text(), "hello world");
+        assert_eq!(
+            doc.spans(),
+            vec![
+                ("hello".to_string(), Attrs::bold()),
+                (" world".to_string(), Attrs::plain()),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_changes_only_what_it_names() {
+        let mut doc = Document::from_text("hello");
+        doc.apply(&Op::format(1, 0, 5, FormatChange::bold(true)))
+            .unwrap();
+        doc.apply(&Op::format(1, 1, 3, FormatChange::italic(true)))
+            .unwrap();
+        // The middle is bold and italic; the ends are only bold.
+        let mut italic = Attrs::bold();
+        italic.italic = true;
+        assert_eq!(
+            doc.spans(),
+            vec![
+                ("h".to_string(), Attrs::bold()),
+                ("ell".to_string(), italic),
+                ("o".to_string(), Attrs::bold()),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_can_add_and_remove_a_link() {
+        let mut doc = Document::from_text("click here");
+        doc.apply(&Op::format(
+            1,
+            0,
+            5,
+            FormatChange::link(Some("https://example.com".into())),
+        ))
+        .unwrap();
+        assert_eq!(
+            doc.attrs()[0].link.as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(doc.attrs()[6].link, None);
+        doc.apply(&Op::format(1, 0, 5, FormatChange::link(None)))
+            .unwrap();
+        assert!(doc.attrs().iter().all(|a| a.link.is_none()));
+    }
+
+    #[test]
+    fn format_past_the_end_fails_and_changes_nothing() {
+        let mut doc = Document::from_text("hi");
+        let err = doc
+            .apply(&Op::format(1, 1, 2, FormatChange::bold(true)))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            OpError::FormatOutOfBounds {
+                pos: 1,
+                len: 2,
+                doc_len: 2
+            }
+        );
+        assert!(doc.attrs().iter().all(|a| a.is_plain()));
+    }
+
+    #[test]
+    fn insert_carries_its_attributes_and_delete_drops_them() {
+        let mut doc = Document::from_text("ab");
+        doc.apply(&Op::insert_styled(1, 1, "X", Attrs::bold()))
+            .unwrap();
+        assert_eq!(doc.text(), "aXb");
+        assert_eq!(doc.attrs()[1], Attrs::bold());
+        assert_eq!(doc.attrs()[2], Attrs::plain());
+        doc.apply(&Op::delete(1, 1, 1)).unwrap();
+        assert_eq!(doc.text(), "ab");
+        assert!(doc.attrs().iter().all(|a| a.is_plain()));
+    }
+
+    #[test]
+    fn spans_merge_equal_runs_and_skip_nothing() {
+        let doc = Document::from_parts(
+            "aab",
+            vec![Attrs::bold(), Attrs::bold(), Attrs::plain()],
+        );
+        assert_eq!(
+            doc.spans(),
+            vec![
+                ("aa".to_string(), Attrs::bold()),
+                ("b".to_string(), Attrs::plain()),
+            ]
+        );
+        assert_eq!(Document::new().spans(), Vec::<Span>::new());
     }
 }

@@ -17,7 +17,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use collab_ot::{Document, Op};
+use collab_ot::{Attrs, Document, Op};
 use serde::{Deserialize, Serialize};
 
 /// One line of the op log: the op and the version it produced.
@@ -31,6 +31,10 @@ struct LogEntry {
 struct Snapshot {
     version: usize,
     text: String,
+    /// The formatting of each character, in order. Old snapshots
+    /// without this field load as plain text.
+    #[serde(default)]
+    attrs: Vec<Attrs>,
 }
 
 /// What loading a room from disk gives back: the document, the version
@@ -85,11 +89,12 @@ impl Store {
             Err(err) if err.kind() == io::ErrorKind::NotFound => Snapshot {
                 version: 0,
                 text: String::new(),
+                attrs: Vec::new(),
             },
             Err(err) => return Err(err),
         };
 
-        let mut doc = Document::from_text(&snapshot.text);
+        let mut doc = Document::from_parts(&snapshot.text, snapshot.attrs);
         let mut history = Vec::new();
         let mut version = snapshot.version;
 
@@ -145,11 +150,12 @@ impl Store {
 
     /// Writes the snapshot for `version` and drops the log lines it
     /// covers, so the log only ever holds ops after the snapshot.
-    pub fn save_snapshot(&self, version: usize, text: &str) -> io::Result<()> {
+    pub fn save_snapshot(&self, version: usize, text: &str, attrs: &[Attrs]) -> io::Result<()> {
         fs::create_dir_all(&self.dir)?;
         let snapshot = Snapshot {
             version,
             text: text.to_string(),
+            attrs: attrs.to_vec(),
         };
         let tmp = self.dir.join("snapshot.json.tmp");
         fs::write(&tmp, serde_json::to_string(&snapshot)?)?;
@@ -220,7 +226,7 @@ mod tests {
         let store = Store::new(&dir, "room1");
         store.append(1, &Op::insert(1, 0, "abc")).unwrap();
         store.append(2, &Op::insert(1, 3, "def")).unwrap();
-        store.save_snapshot(2, "abcdef").unwrap();
+        store.save_snapshot(2, "abcdef", &[]).unwrap();
         store.append(3, &Op::insert(1, 6, "!")).unwrap();
 
         let restored = Store::new(&dir, "room1").load().unwrap().unwrap();
@@ -234,11 +240,38 @@ mod tests {
         let dir = temp_dir();
         let store = Store::new(&dir, "room1");
         store.append(1, &Op::insert(1, 0, "abc")).unwrap();
-        store.save_snapshot(1, "abc").unwrap();
+        store.save_snapshot(1, "abc", &[]).unwrap();
 
         let log = fs::read_to_string(store.log_path()).unwrap();
         assert_eq!(log, "");
         assert!(Store::new(&dir, "room1").load().unwrap().is_some());
+    }
+
+    #[test]
+    fn snapshot_keeps_the_formatting() {
+        use collab_ot::FormatChange;
+
+        let dir = temp_dir();
+        let store = Store::new(&dir, "room1");
+        store.append(1, &Op::insert(1, 0, "abc")).unwrap();
+        store
+            .append(
+                2,
+                &Op::format(1, 0, 2, FormatChange::bold(true)),
+            )
+            .unwrap();
+        let mut doc = Document::from_text("abc");
+        doc.apply(&Op::format(1, 0, 2, FormatChange::bold(true)))
+            .unwrap();
+        store
+            .save_snapshot(2, doc.text(), doc.attrs())
+            .unwrap();
+
+        let restored = Store::new(&dir, "room1").load().unwrap().unwrap();
+        assert_eq!(restored.doc.text(), "abc");
+        assert_eq!(restored.doc.attrs()[0], Attrs::bold());
+        assert_eq!(restored.doc.attrs()[1], Attrs::bold());
+        assert_eq!(restored.doc.attrs()[2], Attrs::plain());
     }
 
     #[test]
