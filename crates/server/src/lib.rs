@@ -17,7 +17,14 @@
 //! and everyone in the room sees everyone else's cursor move. When an
 //! op lands, the other clients' cursors shift past it so they keep
 //! pointing at the same text. Presence is never saved to disk.
+//!
+//! Before joining, a client can ask for the list of documents on the
+//! server, newest first. And a client can join read-only, as a viewer:
+//! it sees the document and everyone in it, but the server refuses
+//! its edits, so a read-only share link cannot write no matter what
+//! client opens it.
 
+pub mod docs;
 pub mod message;
 pub mod presence;
 pub mod room;
@@ -29,11 +36,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use collab_ot::Op;
+use docs::DocInfo;
 use futures_util::{SinkExt, StreamExt};
 use message::{ClientMessage, ServerMessage};
 use presence::PresenceMap;
 use room::Room;
-use store::Store;
+use store::{safe_name, Store};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
@@ -137,6 +145,28 @@ impl Hub {
             .entry(id.to_string())
             .or_insert_with(|| RoomState::new(&data_dir, id))
     }
+
+    /// Every document the server knows about, newest first: the rooms
+    /// on disk, overlaid with the rooms in memory, which are fresher.
+    /// A room that was joined but never edited has no files yet, so it
+    /// shows up with no save time and sorts last.
+    pub fn list_docs(&self) -> Vec<DocInfo> {
+        let mut docs = docs::scan(&self.data_dir);
+        for (id, state) in &self.rooms {
+            let info = docs::from_room(
+                id,
+                state.room.text(),
+                state.room.version(),
+                state.store.updated_at(),
+            );
+            match docs.iter_mut().find(|doc| doc.id == safe_name(id)) {
+                Some(existing) => *existing = info,
+                None => docs.push(info),
+            }
+        }
+        docs::sort_docs(&mut docs);
+        docs
+    }
 }
 
 impl Default for Hub {
@@ -175,15 +205,35 @@ async fn handle_connection(
     let ws = accept_async(stream).await?;
     let (mut write, mut read) = ws.split();
 
-    // The first message must be a join; without a room there is nothing
-    // to do.
-    let (room_id, client_id, mut rx) = match read.next().await {
-        Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
-            Ok(ClientMessage::Join {
+    // The first message is a join, or a list request first and a join
+    // after it: a client that has not picked a room yet asks what
+    // documents exist, then joins one on the same connection.
+    let (room_id, client_id, read_only, mut rx) = loop {
+        let msg = match read.next().await {
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<ClientMessage>(&text) {
+                    Ok(msg) => msg,
+                    Err(err) => return Err(format!("bad message: {err}").into()),
+                }
+            }
+            Some(Ok(_)) => return Err("first message was not text".into()),
+            Some(Err(err)) => return Err(err.into()),
+            None => return Ok(()),
+        };
+        match msg {
+            ClientMessage::List => {
+                let docs = hub.lock().await.list_docs();
+                let reply = ServerMessage::Docs { docs };
+                write
+                    .send(Message::Text(serde_json::to_string(&reply)?.into()))
+                    .await?;
+            }
+            ClientMessage::Join {
                 room,
                 client_id,
                 name,
-            }) => {
+                read_only,
+            } => {
                 let mut hub = hub.lock().await;
                 let state = hub.room(&room);
                 let joined = ServerMessage::Joined {
@@ -192,6 +242,7 @@ async fn handle_connection(
                     attrs: state.room.attrs().to_vec(),
                     version: state.room.version(),
                     presences: state.presence.all(),
+                    read_only,
                 };
                 let rx = state.tx.subscribe();
                 write
@@ -205,13 +256,10 @@ async fn handle_connection(
                     from: client_id,
                     message: ServerMessage::Presence { presence },
                 });
-                (room, client_id, rx)
+                break (room, client_id, read_only, rx);
             }
-            _ => return Err("first message was not a join".into()),
-        },
-        Some(Ok(_)) => return Err("first message was not text".into()),
-        Some(Err(err)) => return Err(err.into()),
-        None => return Ok(()),
+            _ => return Err("first message was not a join or a list".into()),
+        }
     };
 
     // From here on, incoming ops and room broadcasts run side by side:
@@ -228,7 +276,7 @@ async fn handle_connection(
                     break;
                 }
                 let Message::Text(text) = msg else { continue };
-                let reply = handle_message(&text, &room_id, client_id, &hub).await;
+                let reply = handle_message(&text, &room_id, client_id, read_only, &hub).await;
                 if let Some(reply) = reply {
                     let Ok(text) = serde_json::to_string(&reply) else { break };
                     if write.send(Message::Text(text.into())).await.is_err() {
@@ -287,6 +335,7 @@ async fn handle_message(
     text: &str,
     room_id: &str,
     client_id: u64,
+    read_only: bool,
     hub: &Arc<Mutex<Hub>>,
 ) -> Option<ServerMessage> {
     let msg: ClientMessage = match serde_json::from_str(text) {
@@ -301,6 +350,12 @@ async fn handle_message(
         ClientMessage::Join { .. } => Some(ServerMessage::Error {
             message: "already joined a room".into(),
         }),
+        ClientMessage::List => {
+            let hub = hub.lock().await;
+            Some(ServerMessage::Docs {
+                docs: hub.list_docs(),
+            })
+        }
         ClientMessage::Sync { base_version } => {
             let hub = hub.lock().await;
             let Some(state) = hub.rooms.get(room_id) else {
@@ -352,6 +407,15 @@ async fn handle_message(
             }
         }
         ClientMessage::Op { base_version, seq, op } => {
+            // A viewer can watch, but its edits are refused before
+            // anything is applied or broadcast: read-only is enforced
+            // here, not just in the UI, so a hand-made client cannot
+            // write through a read-only link.
+            if read_only {
+                return Some(ServerMessage::Error {
+                    message: "this document is read-only for you".into(),
+                });
+            }
             if op.site() != client_id {
                 return Some(ServerMessage::Error {
                     message: "op site does not match client id".into(),

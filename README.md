@@ -27,3 +27,13 @@ from half a second up to eight) and resends whatever was not acked; the
 server answers a resend from memory instead of applying the edit twice,
 and the ack carries the edit as the server applied it, so the client's
 copy ends up matching even when other people typed in the meantime.
+
+Opening the client with no room shows the documents list instead:
+every document on the server, newest first, with its title (the first
+line of the text), a preview, its version, and when it was last saved,
+plus a form to create a new one by name. Inside a document, "Copy edit
+link" copies a link others can edit with, and "Copy read-only link"
+copies one with `?mode=read`: it opens the same document as a viewer,
+with a locked box and no format buttons, and the server refuses any
+edit a viewer tries to send — read-only is enforced server-side, not
+just in the UI.

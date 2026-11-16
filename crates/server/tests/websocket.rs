@@ -54,12 +54,29 @@ impl Client {
         client_id: u64,
         name: Option<&str>,
     ) -> (Self, ServerMessage) {
+        Self::connect_with_mode(addr, room, client_id, name, false).await
+    }
+
+    /// Joins as a viewer: the client can see the document, but the
+    /// server refuses its edits.
+    async fn connect_read_only(addr: SocketAddr, room: &str, client_id: u64) -> (Self, ServerMessage) {
+        Self::connect_with_mode(addr, room, client_id, None, true).await
+    }
+
+    async fn connect_with_mode(
+        addr: SocketAddr,
+        room: &str,
+        client_id: u64,
+        name: Option<&str>,
+        read_only: bool,
+    ) -> (Self, ServerMessage) {
         let (ws, _) = connect_async(format!("ws://{addr}")).await.unwrap();
         let (mut write, read) = ws.split();
         let join = ClientMessage::Join {
             room: room.to_string(),
             client_id,
             name: name.map(str::to_string),
+            read_only,
         };
         write
             .send(Message::Text(serde_json::to_string(&join).unwrap().into()))
@@ -73,6 +90,18 @@ impl Client {
         let joined = client.next_server_message().await;
         assert!(matches!(joined, ServerMessage::Joined { .. }));
         (client, joined)
+    }
+
+    /// Connects without joining anything: the client asks for the
+    /// documents list first and joins after it.
+    async fn raw_connect(addr: SocketAddr) -> Self {
+        let (ws, _) = connect_async(format!("ws://{addr}")).await.unwrap();
+        let (write, read) = ws.split();
+        Self {
+            write,
+            read,
+            next_seq: 1,
+        }
     }
 
     async fn send(&mut self, msg: &ClientMessage) {
@@ -254,6 +283,7 @@ async fn late_joiner_gets_current_text() {
             version: 1,
             // Client 1 was already here, caret still at the start.
             presences: vec![presence(1, None)],
+            read_only: false,
         }
     );
 }
@@ -297,6 +327,7 @@ async fn reconnecting_client_replays_missed_ops() {
             version: 2,
             // Client 2 kept typing while A was away.
             presences: vec![presence(2, None)],
+            read_only: false,
         }
     );
     a.send_sync(0).await;
@@ -350,6 +381,7 @@ async fn room_survives_a_server_restart() {
             version: 1,
             // Presence is not saved to disk: a restart clears the room.
             presences: vec![],
+            read_only: false,
         }
     );
 }
@@ -388,6 +420,7 @@ async fn sync_from_before_the_snapshot_gets_the_whole_document() {
             attrs: vec![Attrs::plain(); 51],
             version: 51,
             presences: vec![],
+            read_only: false,
         }
     );
     a.send_sync(0).await;
@@ -471,6 +504,7 @@ async fn joiner_sees_who_is_here_and_the_room_sees_the_joiner() {
             attrs: vec![],
             version: 0,
             presences: vec![presence(1, Some("pranav"))],
+            read_only: false,
         }
     );
     // And A learns about B through a presence broadcast.
@@ -643,6 +677,160 @@ async fn formatting_reaches_the_other_client_and_a_late_joiner() {
             attrs,
             version: 2,
             presences: vec![presence(1, None), b_presence],
+            read_only: false,
         }
     );
+}
+
+#[tokio::test]
+async fn list_before_join_then_join_on_the_same_connection() {
+    let (addr, _server, _dir) = start_server().await;
+    let mut client = Client::raw_connect(addr).await;
+
+    // Nothing saved yet: the list is empty, and the connection stays
+    // open for the join that follows.
+    client.send(&ClientMessage::List).await;
+    assert_eq!(
+        client.next_server_message().await,
+        ServerMessage::Docs { docs: vec![] }
+    );
+
+    client
+        .send(&ClientMessage::Join {
+            room: "notes".to_string(),
+            client_id: 1,
+            name: None,
+            read_only: false,
+        })
+        .await;
+    assert!(matches!(
+        client.next_server_message().await,
+        ServerMessage::Joined { .. }
+    ));
+}
+
+#[tokio::test]
+async fn list_shows_documents_newest_first() {
+    let (addr, _server, _dir) = start_server().await;
+    let (mut a, _) = Client::connect(addr, "notes", 1).await;
+    a.send_op(0, Op::insert(1, 0, "Shopping list\nmilk")).await;
+    assert_eq!(
+        a.next_server_message().await,
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "Shopping list\nmilk")),
+        }
+    );
+    // "ideas" is created second. Its name also sorts first, so the
+    // newest-first order holds whether the two saves land in the same
+    // second or not.
+    let (mut c, _) = Client::connect(addr, "ideas", 3).await;
+    c.send_op(0, Op::insert(3, 0, "Big idea")).await;
+    assert_eq!(
+        c.next_server_message().await,
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(3, 0, "Big idea")),
+        }
+    );
+
+    let mut lister = Client::raw_connect(addr).await;
+    lister.send(&ClientMessage::List).await;
+    let ServerMessage::Docs { docs } = lister.next_server_message().await else {
+        panic!("expected a Docs reply to a List");
+    };
+    assert_eq!(docs.len(), 2);
+    assert_eq!(docs[0].id, "ideas");
+    assert_eq!(docs[0].title, "Big idea");
+    assert_eq!(docs[0].preview, "Big idea");
+    assert_eq!(docs[0].version, 1);
+    assert!(docs[0].updated_at.is_some());
+    assert_eq!(docs[1].id, "notes");
+    assert_eq!(docs[1].title, "Shopping list");
+    assert_eq!(docs[1].preview, "Shopping list milk");
+    assert_eq!(docs[1].version, 1);
+}
+
+#[tokio::test]
+async fn read_only_join_reports_read_only_and_refuses_edits() {
+    let (addr, _server, _dir) = start_server().await;
+    let (mut editor, _) = Client::connect(addr, "notes", 1).await;
+    let (mut viewer, joined) = Client::connect_read_only(addr, "notes", 2).await;
+    assert!(
+        matches!(joined, ServerMessage::Joined { read_only: true, .. }),
+        "read-only join must say so: {joined:?}"
+    );
+
+    // The viewer's edit is refused, and nothing is broadcast.
+    viewer.send_op(0, Op::insert(2, 0, "nope")).await;
+    assert_eq!(
+        viewer.next_server_message().await,
+        ServerMessage::Error {
+            message: "this document is read-only for you".to_string(),
+        }
+    );
+    let leaked = tokio::time::timeout(Duration::from_millis(200), editor.next_server_message()).await;
+    assert!(leaked.is_err(), "refused op reached the editor: {leaked:?}");
+
+    // The editor can still write, and the viewer still sees it: the
+    // refused op never moved the version.
+    editor.send_op(0, Op::insert(1, 0, "hello")).await;
+    assert_eq!(
+        editor.next_server_message().await,
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello")),
+        }
+    );
+    assert_eq!(
+        viewer.next_server_message().await,
+        ServerMessage::Op {
+            version: 1,
+            op: Op::insert(1, 0, "hello"),
+        }
+    );
+}
+
+#[tokio::test]
+async fn read_only_viewer_can_still_move_its_cursor() {
+    let (addr, _server, _dir) = start_server().await;
+    let (mut editor, _) = Client::connect(addr, "notes", 1).await;
+    let (mut viewer, _) = Client::connect_read_only(addr, "notes", 2).await;
+
+    editor.send_op(0, Op::insert(1, 0, "hello world")).await;
+    assert_eq!(
+        editor.next_server_message().await,
+        ServerMessage::Ack {
+            version: 1,
+            seq: 1,
+            op: Some(Op::insert(1, 0, "hello world")),
+        }
+    );
+    assert_eq!(
+        viewer.next_server_message().await,
+        ServerMessage::Op {
+            version: 1,
+            op: Op::insert(1, 0, "hello world"),
+        }
+    );
+
+    // The viewer reports its caret; the editor sees it move, even
+    // though the viewer cannot type.
+    viewer.send_presence(5, None).await;
+    let mut seen = false;
+    for _ in 0..3 {
+        match editor.next_raw_message().await {
+            ServerMessage::Presence { presence } if presence.client_id == 2 => {
+                if presence.cursor == 5 {
+                    seen = true;
+                    break;
+                }
+            }
+            _ => continue,
+        }
+    }
+    assert!(seen, "editor never saw the viewer's cursor at 5");
 }

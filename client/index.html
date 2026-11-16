@@ -14,6 +14,12 @@
       #preview:empty::before { content: "Nothing here yet."; color: #999; }
       #status { color: #555; margin: 0.5rem 0; }
       #presence { margin: 0.5rem 0; }
+      #share { margin: 0.5rem 0; }
+      #share button { padding: 0.3rem 0.7rem; margin-right: 0.4rem; font-size: 1rem; cursor: pointer; }
+      .doc { border: 1px solid #ddd; border-radius: 4px; padding: 0.75rem; margin: 0.5rem 0; }
+      .doc .preview { color: #555; margin: 0.25rem 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .doc .meta { color: #888; font-size: 0.85rem; margin: 0.25rem 0 0.5rem; }
+      .doc button { padding: 0.3rem 0.7rem; margin-right: 0.4rem; font-size: 1rem; cursor: pointer; }
       .peer { margin: 0.2rem 0; }
       .dot { display: inline-block; width: 0.7rem; height: 0.7rem; border-radius: 50%; margin-right: 0.4rem; }
       form { margin-bottom: 1rem; }
@@ -22,11 +28,24 @@
   </head>
   <body>
     <h1>collab</h1>
+    <section id="docsSection">
+      <h2>Documents</h2>
+      <div id="docs">Loading…</div>
+      <form id="newDoc">
+        <label>New document <input id="newDocName" name="newDocName" placeholder="name it" /></label>
+        <button type="submit">Create</button>
+      </form>
+    </section>
+    <section id="editorSection">
     <form id="join">
       <label>Room <input id="room" name="room" value="notes" /></label>
       <label>Name <input id="name" name="name" placeholder="your name" /></label>
       <button type="submit">Join</button>
     </form>
+    <div id="share">
+      <button id="copyEditLink" type="button" title="Copy a link others can edit with">Copy edit link</button>
+      <button id="copyReadLink" type="button" title="Copy a link others can only view">Copy read-only link</button>
+    </div>
     <div id="formatbar">
       <button id="boldBtn" type="button" title="Bold the selection"><b>B</b></button>
       <button id="italicBtn" type="button" title="Italicize the selection"><i>I</i></button>
@@ -36,6 +55,7 @@
     <div id="preview" aria-label="Formatted preview"></div>
     <p id="status">connecting…</p>
     <div id="presence"></div>
+    </section>
     <script type="module" src="./dist/main.js"></script>
   </body>
 </html>

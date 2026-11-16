@@ -8,8 +8,16 @@
 // the document's spans as bold, italic, and links, built with DOM calls
 // so document text never becomes HTML.
 //
+// A client that joined read-only gets a locked box instead: the
+// textarea is read-only and the format buttons are disabled, so the
+// viewer can watch but not type.
+//
 // The textarea counts caret positions in UTF-16 units; the protocol
 // counts characters (code points), so the caret is converted both ways.
+//
+// `bindDocList` renders the documents list on the home page: one row
+// per document with its title, preview, version and last save, an Open
+// button, and a button that copies a read-only share link.
 
 import type { CollabClient } from "./client.js";
 import { chars, shiftPosition } from "./editor.js";
@@ -30,6 +38,106 @@ export function lineCol(text: string, pos: number): { line: number; col: number 
   const before = chars(text).slice(0, pos).join("");
   const lines = before.split("\n");
   return { line: lines.length, col: chars(lines[lines.length - 1] ?? "").length + 1 };
+}
+
+/** A share link for a document: this page with the room set, and
+ * `mode=read` on a read-only link. The user's name, if any, carries
+ * over, so a shared link keeps who they are. */
+export function docUrl(roomId: string, readOnly: boolean): string {
+  const next = new URLSearchParams(window.location.search);
+  next.set("room", roomId);
+  if (readOnly) next.set("mode", "read");
+  else next.delete("mode");
+  return `${window.location.origin}${window.location.pathname}?${next.toString()}`;
+}
+
+/** Copies `text` and briefly shows "Copied!" on the button. Falls
+ * back to a hidden textarea when the clipboard API is unavailable. */
+export async function copyText(text: string, button: HTMLButtonElement): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const scratch = document.createElement("textarea");
+    scratch.value = text;
+    document.body.appendChild(scratch);
+    scratch.select();
+    document.execCommand("copy");
+    scratch.remove();
+  }
+  const label = button.textContent;
+  button.textContent = "Copied!";
+  setTimeout(() => {
+    button.textContent = label;
+  }, 1500);
+}
+
+/** "Nov 16, 2026, 8:04 AM", or "not saved yet" for a room that has
+ * never been written to disk. */
+export function formatUpdated(updatedAt: number | null): string {
+  if (updatedAt === null) return "not saved yet";
+  return new Date(updatedAt * 1000).toLocaleString();
+}
+
+/** Opens a document: this page with the room set and read mode off. */
+function openRoom(id: string): void {
+  const next = new URLSearchParams(window.location.search);
+  next.set("room", id);
+  next.delete("mode");
+  window.location.search = next.toString();
+}
+
+/** Renders the documents list into `listEl` and wires the form that
+ * creates a new document by name. Re-renders whenever the client
+ * reports a new list. */
+export function bindDocList(
+  listEl: HTMLElement,
+  form: HTMLFormElement,
+  nameInput: HTMLInputElement,
+  client: CollabClient,
+): void {
+  const render = () => {
+    listEl.innerHTML = "";
+    if (client.docs.length === 0) {
+      listEl.textContent = "No documents yet — create one below.";
+      return;
+    }
+    for (const doc of client.docs) {
+      const row = document.createElement("div");
+      row.className = "doc";
+      const title = document.createElement("strong");
+      title.textContent = doc.title;
+      row.appendChild(title);
+      const preview = document.createElement("div");
+      preview.className = "preview";
+      preview.textContent = doc.preview === "" ? "Empty document" : doc.preview;
+      row.appendChild(preview);
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = `v${doc.version} · ${formatUpdated(doc.updated_at)}`;
+      row.appendChild(meta);
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = "Open";
+      open.addEventListener("click", () => openRoom(doc.id));
+      row.appendChild(open);
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.textContent = "Copy read-only link";
+      copy.addEventListener("click", () => void copyText(docUrl(doc.id, true), copy));
+      row.appendChild(copy);
+      listEl.appendChild(row);
+    }
+  };
+  client.onChange = (change) => {
+    if (change.kind === "docs") render();
+  };
+  render();
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const id = nameInput.value.trim();
+    if (id === "") return;
+    openRoom(id);
+  });
 }
 
 function selectionOf(area: HTMLTextAreaElement): Selection | null {
@@ -108,15 +216,25 @@ export function bindEditor(
             ? "reconnecting…"
             : "disconnected";
     const unsent = client.pendingCount > 0 ? ` · ${client.pendingCount} unsent` : "";
+    const mode = client.readOnly ? " · read-only" : "";
     statusEl.textContent = client.lastError
-      ? `${state} · room ${client.room} · v${client.editor.version}${unsent} · ${client.lastError}`
-      : `${state} · room ${client.room} · v${client.editor.version}${unsent}`;
+      ? `${state} · room ${client.room} · v${client.editor.version}${unsent}${mode} · ${client.lastError}`
+      : `${state} · room ${client.room} · v${client.editor.version}${unsent}${mode}`;
+  };
+
+  /** A viewer gets a locked box: read-only text and no format buttons. */
+  const applyMode = () => {
+    area.readOnly = client.readOnly;
+    formatBar.querySelectorAll("button").forEach((button) => {
+      button.disabled = client.readOnly;
+    });
   };
 
   const renderAll = () => {
     renderStatus();
     renderPresence();
     renderPreview();
+    applyMode();
   };
 
   /** The highlighted range in code-point positions, or null when the

@@ -105,8 +105,19 @@ export interface Presence {
   selection: Selection | null;
 }
 
+/** One row of the documents list. `updated_at` is seconds since the
+ * Unix epoch when the room was last saved, or null when it never was. */
+export interface DocInfo {
+  id: string;
+  title: string;
+  preview: string;
+  version: number;
+  updated_at: number | null;
+}
+
 export type ClientMessage =
-  | { type: "join"; room: string; client_id: number; name?: string }
+  | { type: "join"; room: string; client_id: number; name?: string; read_only?: boolean }
+  | { type: "list" }
   | { type: "op"; base_version: number; seq: number; op: Op }
   | { type: "sync"; base_version: number }
   | { type: "presence"; cursor: number; selection: Selection | null };
@@ -118,9 +129,12 @@ export type ServerMessage =
       text: string;
       /** The formatting of each character, in order; absent on old messages. */
       attrs?: Attrs[];
+      /** True when this client joined as a viewer. Absent on old messages. */
+      read_only?: boolean;
       version: number;
       presences: Presence[];
     }
+  | { type: "docs"; docs: DocInfo[] }
   | { type: "op"; version: number; op: Op }
   // `seq` echoes the op's number, so the client knows which queued op
   // this ack is for. `op` is the op as the server applied it, or null
@@ -205,6 +219,17 @@ function isPresence(value: unknown): value is Presence {
   );
 }
 
+function isDocInfo(value: unknown): value is DocInfo {
+  return (
+    isObject(value) &&
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.preview === "string" &&
+    typeof value.version === "number" &&
+    (typeof value.updated_at === "number" || value.updated_at === null)
+  );
+}
+
 function isSelection(value: unknown): value is Selection {
   return (
     isObject(value) && typeof value.anchor === "number" && typeof value.head === "number"
@@ -229,10 +254,16 @@ export function decodeServer(text: string): ServerMessage {
         typeof value.text === "string" &&
         (value.attrs === undefined ||
           (Array.isArray(value.attrs) && value.attrs.every(isAttrs))) &&
+        (value.read_only === undefined || typeof value.read_only === "boolean") &&
         typeof value.version === "number" &&
         Array.isArray(value.presences) &&
         value.presences.every(isPresence)
       ) {
+        return value as ServerMessage;
+      }
+      break;
+    case "docs":
+      if (Array.isArray(value.docs) && value.docs.every(isDocInfo)) {
         return value as ServerMessage;
       }
       break;

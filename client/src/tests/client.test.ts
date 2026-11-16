@@ -297,3 +297,72 @@ test("close stops reconnecting after a drop", async () => {
   await tick();
   assert.equal(sockets.length, 1);
 });
+
+test("read-only connect sends read_only and locks local edits", () => {
+  const sockets: FakeSocket[] = [];
+  const client = new CollabClient(
+    1,
+    () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    { reconnectDelay: () => 0 },
+  );
+  client.connect("ws://localhost:8080", "notes", "pranav", true);
+  const socket = sockets[0];
+  assert.ok(socket);
+  socket.open();
+  assert.deepEqual(JSON.parse(socket.sent[0] ?? ""), {
+    type: "join",
+    room: "notes",
+    client_id: 1,
+    name: "pranav",
+    read_only: true,
+  });
+  socket.receive(
+    '{"type":"joined","room":"notes","text":"hello","read_only":true,"version":1,"presences":[]}',
+  );
+  assert.equal(client.readOnly, true);
+  // A viewer cannot type or format: nothing is echoed or queued.
+  client.localEdit("hello world");
+  client.formatRange(0, 5, { bold: true });
+  assert.equal(client.editor.text, "hello");
+  assert.equal(client.pendingCount, 0);
+  assert.equal(socket.sent.length, 1);
+});
+
+test("list before join: the list goes out, then the join on the same socket", () => {
+  const sockets: FakeSocket[] = [];
+  const client = new CollabClient(
+    1,
+    () => {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    { reconnectDelay: () => 0 },
+  );
+  const kinds: string[] = [];
+  client.onChange = (change) => kinds.push(change.kind);
+  client.connectForList("ws://localhost:8080");
+  const socket = sockets[0];
+  assert.ok(socket);
+  socket.open();
+  assert.equal(socket.sent[0], '{"type":"list"}');
+  socket.receive(
+    '{"type":"docs","docs":[{"id":"notes","title":"Shopping list","preview":"milk","version":2,"updated_at":1793000000}]}',
+  );
+  assert.equal(client.docs.length, 1);
+  assert.equal(client.docs[0]?.title, "Shopping list");
+  assert.deepEqual(kinds, ["docs"]);
+  // Picking a document joins it on the same socket.
+  client.join("notes", "pranav");
+  assert.equal(
+    socket.sent[1],
+    encodeClient({ type: "join", room: "notes", client_id: 1, name: "pranav" }),
+  );
+  socket.receive('{"type":"joined","room":"notes","text":"milk","version":2,"presences":[]}');
+  assert.equal(client.status, "connected");
+  assert.equal(client.readOnly, false);
+});

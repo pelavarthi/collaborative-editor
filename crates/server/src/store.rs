@@ -16,9 +16,26 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use collab_ot::{Attrs, Document, Op};
 use serde::{Deserialize, Serialize};
+
+/// The directory name a room id maps to: letters, digits, `-`, `_`
+/// and `.` survive, anything else becomes `_`, so a client cannot
+/// escape the data dir with a name like `../elsewhere`.
+pub fn safe_name(room_id: &str) -> String {
+    room_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 /// One line of the op log: the op and the version it produced.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,19 +74,18 @@ impl Store {
     /// into a directory name, so a client cannot escape the data dir
     /// with a name like `../elsewhere`.
     pub fn new(data_dir: impl AsRef<Path>, room_id: &str) -> Self {
-        let safe: String = room_id
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
         Self {
-            dir: data_dir.as_ref().join(safe),
+            dir: data_dir.as_ref().join(safe_name(room_id)),
         }
+    }
+
+    /// When the room was last saved: the newest mtime of its snapshot
+    /// and log files, or `None` when nothing has been written yet.
+    pub fn updated_at(&self) -> Option<SystemTime> {
+        [self.snapshot_path(), self.log_path()]
+            .iter()
+            .filter_map(|path| fs::metadata(path).ok()?.modified().ok())
+            .max()
     }
 
     fn snapshot_path(&self) -> PathBuf {
@@ -281,6 +297,28 @@ mod tests {
         store.append(1, &Op::insert(1, 0, "x")).unwrap();
         assert!(dir.join(".._escape").exists());
         assert!(!dir.join("escape").exists());
+    }
+
+    #[test]
+    fn updated_at_is_none_before_anything_is_saved() {
+        let store = Store::new(temp_dir(), "room1");
+        assert!(store.updated_at().is_none());
+    }
+
+    #[test]
+    fn updated_at_moves_when_an_op_is_appended() {
+        use std::time::Duration;
+
+        let dir = temp_dir();
+        let store = Store::new(&dir, "room1");
+        let before = SystemTime::now();
+        store.append(1, &Op::insert(1, 0, "x")).unwrap();
+        let saved = store.updated_at().unwrap();
+        assert!(saved <= SystemTime::now());
+        // The file clock can tick coarser than the system clock, so a
+        // save a fraction of a second old may read a touch earlier
+        // than `before`; within two seconds is close enough.
+        assert!(before.duration_since(saved).unwrap_or(Duration::ZERO) < Duration::from_secs(2));
     }
 
     #[test]

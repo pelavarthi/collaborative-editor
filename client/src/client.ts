@@ -17,6 +17,7 @@ import {
   decodeServer,
   encodeClient,
   type ClientMessage,
+  type DocInfo,
   type FormatChange,
   type Op,
   type Presence,
@@ -51,7 +52,7 @@ export function wrapWebSocket(ws: WebSocket): Socket {
   return socket;
 }
 
-export type ChangeKind = "joined" | "local" | "remote" | "presence" | "status";
+export type ChangeKind = "joined" | "local" | "remote" | "presence" | "status" | "docs";
 
 export interface Change {
   kind: ChangeKind;
@@ -88,16 +89,29 @@ export class CollabClient {
   status: "connecting" | "connected" | "reconnecting" | "closed" = "connecting";
   presences = new Map<number, Presence>();
   lastError: string | null = null;
+  /** The documents list from the last `list` answer, newest first. */
+  docs: DocInfo[] = [];
+  /** True when this client joined as a viewer: it can watch but not
+   * type. Set when joining read-only, and confirmed by the Joined
+   * message when it arrives. */
+  readOnly = false;
 
   /** Fired after every state change; the UI re-reads the client. */
   onChange: (change: Change) => void = () => {};
   onError: (message: string) => void = () => {};
 
   private socket: Socket | null = null;
+  private socketOpen = false;
   private readonly createSocket: SocketFactory;
   private readonly reconnectDelay: (attempt: number) => number;
   private url = "";
   private name: string | undefined;
+  /** The join to send once the socket opens: kept after joining, so
+   * a reconnect rejoins the same room on its own. */
+  private pendingJoin: { room: string; name: string | undefined; readOnly: boolean } | null = null;
+  /** True when the socket should ask for the documents list instead
+   * of joining, until `join` picks a room. */
+  private listOnOpen = false;
   private pending: PendingOp[] = [];
   private nextSeq = 1;
   private reconnectAttempt = 0;
@@ -121,18 +135,47 @@ export class CollabClient {
     return this.pending.length;
   }
 
-  connect(url: string, room: string, name?: string): void {
+  connect(url: string, room: string, name?: string, readOnly = false): void {
     this.url = url;
-    this.room = room;
-    this.name = name;
+    this.join(room, name, readOnly);
     this.closedByUser = false;
     this.reconnectAttempt = 0;
     this.status = "connecting";
     this.openSocket();
   }
 
-  /** A keystroke: echo it locally at once, then queue the ops it made. */
+  /** Connects without joining, to ask for the documents list first.
+   * Call `join` once the user picks one. */
+  connectForList(url: string): void {
+    this.url = url;
+    this.listOnOpen = true;
+    this.closedByUser = false;
+    this.reconnectAttempt = 0;
+    this.status = "connecting";
+    this.openSocket();
+  }
+
+  /** Joins a room: on the open socket, or on the next one if it is
+   * not open yet. `readOnly` joins as a viewer that can watch but
+   * not type; the server confirms it in the Joined message. */
+  join(room: string, name?: string, readOnly = false): void {
+    this.room = room;
+    this.name = name;
+    this.readOnly = readOnly;
+    this.listOnOpen = false;
+    this.pendingJoin = { room, name, readOnly };
+    this.sendJoinIfReady();
+  }
+
+  /** Asks the server for the documents list. */
+  listDocs(): void {
+    this.send({ type: "list" });
+  }
+
+  /** A keystroke: echo it locally at once, then queue the ops it made.
+   * A viewer has nothing to echo: its edits would be refused. */
   localEdit(newText: string): void {
+    if (this.readOnly) return;
     const ops = this.editor.localEdit(newText);
     for (const op of ops) {
       this.pending.push({
@@ -150,9 +193,11 @@ export class CollabClient {
   /**
    * Formats a range: bold, italic, or a link. Echoes it locally at
    * once like a keystroke, then queues the op for the server. An empty
-   * range or a change that touches nothing sends nothing.
+   * range or a change that touches nothing sends nothing. A viewer
+   * cannot format either: its edits would be refused.
    */
   formatRange(pos: number, len: number, change: FormatChange): void {
+    if (this.readOnly) return;
     const op = this.editor.formatRange(pos, len, change);
     if (op === null) return;
     this.pending.push({
@@ -198,13 +243,15 @@ export class CollabClient {
     const socket = this.createSocket(this.url);
     this.socket = socket;
     socket.onopen = () => {
-      // The first message must be a join; without a room there is
-      // nothing to do.
-      const join: ClientMessage =
-        this.name === undefined
-          ? { type: "join", room: this.room, client_id: this.site }
-          : { type: "join", room: this.room, client_id: this.site, name: this.name };
-      socket.send(encodeClient(join));
+      this.socketOpen = true;
+      // A join queued before the socket opened goes out now; a
+      // reconnect rejoins the same room on its own. Otherwise, when
+      // the client connected just to list, ask for the documents.
+      this.sendJoinIfReady();
+      if (this.pendingJoin === null && this.listOnOpen) {
+        this.listOnOpen = false;
+        this.send({ type: "list" });
+      }
     };
     socket.onmessage = (data) => {
       let msg: ServerMessage;
@@ -218,6 +265,7 @@ export class CollabClient {
     };
     socket.onclose = () => {
       this.socket = null;
+      this.socketOpen = false;
       if (this.closedByUser) {
         this.status = "closed";
       } else {
@@ -242,6 +290,20 @@ export class CollabClient {
       this.onChange({ kind: "status" });
       this.openSocket();
     }, delay);
+  }
+
+  /** Sends the queued join when the socket is open. `read_only` is
+   * only sent when true, so an editor's join keeps the old shape. */
+  private sendJoinIfReady(): void {
+    if (!this.socketOpen || this.pendingJoin === null) return;
+    const { room, name, readOnly } = this.pendingJoin;
+    this.send({
+      type: "join",
+      room,
+      client_id: this.site,
+      ...(name !== undefined ? { name } : {}),
+      ...(readOnly ? { read_only: true } : {}),
+    });
   }
 
   /** Sends every queued op that has not gone out on this socket yet. */
@@ -279,6 +341,7 @@ export class CollabClient {
       case "joined":
         this.editor.replace(msg.text, msg.version, msg.attrs);
         this.presences = new Map(msg.presences.map((p) => [p.client_id, p]));
+        this.readOnly = msg.read_only ?? false;
         this.status = "connected";
         this.reconnectAttempt = 0;
         // The rejoin replaced the text, so the echo of every queued op
@@ -290,6 +353,10 @@ export class CollabClient {
         }
         this.onChange({ kind: "joined" });
         this.flush();
+        break;
+      case "docs":
+        this.docs = msg.docs;
+        this.onChange({ kind: "docs" });
         break;
       case "op":
         this.editor.applyRemote(msg.op, msg.version);

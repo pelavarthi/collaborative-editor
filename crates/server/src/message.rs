@@ -1,6 +1,7 @@
 //! The JSON messages clients and the server send each other over the
 //! WebSocket. Every message is one text frame carrying one JSON object.
 
+use crate::docs::DocInfo;
 use crate::presence::{Presence, Selection};
 use collab_ot::{Attrs, Op};
 use serde::{Deserialize, Serialize};
@@ -13,12 +14,20 @@ pub enum ClientMessage {
     /// used to break ties when two clients insert at the same spot.
     /// `name` is the display name shown next to the client's cursor;
     /// older clients that do not send one just show up unnamed.
+    /// `read_only` joins as a viewer: the client can see the document
+    /// and everyone in it, but its edits are refused.
     Join {
         room: String,
         client_id: u64,
         #[serde(default)]
         name: Option<String>,
+        #[serde(default)]
+        read_only: bool,
     },
+    /// Ask for the list of documents on the server. Sent before
+    /// joining, so a client can pick a room first; the server answers
+    /// with `Docs` and the connection stays open for the join.
+    List,
     /// An edit made against the document as it was at `base_version`.
     /// `seq` counts this client's ops from 1 up, so a resend after a
     /// lost ack carries the same number and the server can tell it
@@ -43,7 +52,8 @@ pub enum ServerMessage {
     /// Sent right after joining: the room's current text and version,
     /// plus who else is already here. `attrs` is the formatting of
     /// each character, in order; without it a joining client would
-    /// see the text but lose the bold.
+    /// see the text but lose the bold. `read_only` echoes the join:
+    /// a viewer joined read-only, an editor did not.
     Joined {
         room: String,
         text: String,
@@ -51,7 +61,12 @@ pub enum ServerMessage {
         attrs: Vec<Attrs>,
         version: usize,
         presences: Vec<Presence>,
+        #[serde(default)]
+        read_only: bool,
     },
+    /// The documents list, in answer to a `List`: one row per room,
+    /// newest first.
+    Docs { docs: Vec<DocInfo> },
     /// An op from another client, already transformed and applied.
     Op { version: usize, op: Op },
     /// The server applied this client's op; `version` is the new version.

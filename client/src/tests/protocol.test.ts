@@ -203,3 +203,44 @@ test("op helpers cover formats", () => {
   assert.equal(isNoop(formatOp(1, 0, 0, { bold: true })), true);
   assert.equal(isNoop(formatOp(1, 0, 2, { bold: true })), false);
 });
+
+test("decode docs list and joined with read_only", () => {
+  assert.deepEqual(
+    decodeServer(
+      '{"type":"docs","docs":[{"id":"notes","title":"Shopping list","preview":"Shopping list milk","version":3,"updated_at":1793000000},{"id":"empty","title":"empty","preview":"","version":0,"updated_at":null}]}',
+    ),
+    {
+      type: "docs",
+      docs: [
+        {
+          id: "notes",
+          title: "Shopping list",
+          preview: "Shopping list milk",
+          version: 3,
+          updated_at: 1793000000,
+        },
+        { id: "empty", title: "empty", preview: "", version: 0, updated_at: null },
+      ],
+    },
+  );
+
+  // A read-only join says so; a server that omits the flag still
+  // decodes, as an editor.
+  const joined = decodeServer(
+    '{"type":"joined","room":"notes","text":"hi","read_only":true,"version":1,"presences":[]}',
+  );
+  assert.equal(joined.type, "joined");
+  if (joined.type === "joined") assert.equal(joined.read_only, true);
+  const old = decodeServer(
+    '{"type":"joined","room":"notes","text":"hi","version":1,"presences":[]}',
+  );
+  assert.equal(old.type, "joined");
+  if (old.type === "joined") assert.equal(old.read_only, undefined);
+});
+
+test("decode rejects a docs row with a bad shape", () => {
+  assert.throws(
+    () => decodeServer('{"type":"docs","docs":[{"id":"notes","title":"x"}]}'),
+    /not a server message/,
+  );
+});
