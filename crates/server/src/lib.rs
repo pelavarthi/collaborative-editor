@@ -198,6 +198,35 @@ pub async fn serve_with_data_dir(
     }
 }
 
+/// The half of a WebSocket a connection writes to.
+type WsWrite = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    Message,
+>;
+
+/// Forwards one broadcast to this client, unless it came from the
+/// client itself. Returns false when the connection should end.
+async fn forward_broadcast(write: &mut WsWrite, broadcast: Broadcast, client_id: u64) -> bool {
+    if broadcast.from == client_id {
+        return true;
+    }
+    let Ok(text) = serde_json::to_string(&broadcast.message) else {
+        return false;
+    };
+    write.send(Message::Text(text.into())).await.is_ok()
+}
+
+/// Tells a client it fell too far behind the broadcast buffer to catch
+/// up: it should rejoin and take a snapshot.
+async fn send_missed_messages(write: &mut WsWrite) {
+    let reply = ServerMessage::Error {
+        message: "missed messages, please rejoin".into(),
+    };
+    if let Ok(text) = serde_json::to_string(&reply) {
+        let _ = write.send(Message::Text(text.into())).await;
+    }
+}
+
 async fn handle_connection(
     stream: TcpStream,
     hub: Arc<Mutex<Hub>>,
@@ -267,7 +296,16 @@ async fn handle_connection(
     // it came from this client. Any failure of the socket ends the
     // session by breaking out, so the disconnect cleanup below always
     // runs — a dropped connection must drop the client's cursor too.
-    loop {
+    //
+    // One ordering rule matters here: a reply must never jump ahead of
+    // broadcasts the server already sent this client. An op applied
+    // before this one could still be queued in the broadcast channel
+    // when this client's op is answered, and a client that applies
+    // messages in arrival order would then apply them out of order and
+    // diverge. So before any reply goes out, the queued broadcasts are
+    // forwarded first, in order. Anything sent after that drain is for
+    // an op applied after this one, so it cannot overtake the reply.
+    'session: loop {
         tokio::select! {
             incoming = read.next() => {
                 let Some(msg) = incoming else { break };
@@ -278,32 +316,36 @@ async fn handle_connection(
                 let Message::Text(text) = msg else { continue };
                 let reply = handle_message(&text, &room_id, client_id, read_only, &hub).await;
                 if let Some(reply) = reply {
-                    let Ok(text) = serde_json::to_string(&reply) else { break };
+                    loop {
+                        match rx.try_recv() {
+                            Ok(broadcast) => {
+                                if !forward_broadcast(&mut write, broadcast, client_id).await {
+                                    break 'session;
+                                }
+                            }
+                            Err(broadcast::error::TryRecvError::Empty) => break,
+                            Err(broadcast::error::TryRecvError::Closed) => break 'session,
+                            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                                send_missed_messages(&mut write).await;
+                                break 'session;
+                            }
+                        }
+                    }
+                    let Ok(text) = serde_json::to_string(&reply) else { break 'session };
                     if write.send(Message::Text(text.into())).await.is_err() {
-                        break;
+                        break 'session;
                     }
                 }
             }
             broadcast = rx.recv() => {
                 match broadcast {
                     Ok(broadcast) => {
-                        if broadcast.from == client_id {
-                            continue;
-                        }
-                        let Ok(text) = serde_json::to_string(&broadcast.message) else { break };
-                        if write.send(Message::Text(text.into())).await.is_err() {
+                        if !forward_broadcast(&mut write, broadcast, client_id).await {
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // This client fell too far behind to catch up from
-                        // the buffer; it should rejoin and take a snapshot.
-                        let reply = ServerMessage::Error {
-                            message: "missed messages, please rejoin".into(),
-                        };
-                        if let Ok(text) = serde_json::to_string(&reply) {
-                            let _ = write.send(Message::Text(text.into())).await;
-                        }
+                        send_missed_messages(&mut write).await;
                         break;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,

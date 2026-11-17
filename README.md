@@ -48,3 +48,8 @@ copies one with `?mode=read`: it opens the same document as a viewer,
 with a locked box and no format buttons, and the server refuses any
 edit a viewer tries to send — read-only is enforced server-side, not
 just in the UI.
+
+The server is also tested under chaos: several clients type at once
+with random lag between keystrokes, one drops off mid-session and
+comes back, and every client still ends up with the same text at the
+same version. See `crates/server/tests/chaos.rs`.
