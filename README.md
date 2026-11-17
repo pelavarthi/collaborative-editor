@@ -27,6 +27,17 @@ from half a second up to eight) and resends whatever was not acked; the
 server answers a resend from memory instead of applying the edit twice,
 and the ack carries the edit as the server applied it, so the client's
 copy ends up matching even when other people typed in the meantime.
+The client keeps working offline: typing still echoes and queues, the
+status line says offline and how many edits are unsent, and the text
+and the queue are saved on the device after each change, so a reload
+while offline brings the edits back. When the network returns, the
+client reconnects at once and the server transforms each resent edit
+past whatever landed while it was away, so both sides converge. Two
+conflicts cannot be transformed away and are handled by resyncing
+instead: an edit the server dropped as a no-op is still in the local
+text, so the client rejoins for a fresh copy, and edits written
+against a version the server has compacted away are dropped with a
+warning rather than replayed onto the wrong document.
 
 Opening the client with no room shows the documents list instead:
 every document on the server, newest first, with its title (the first

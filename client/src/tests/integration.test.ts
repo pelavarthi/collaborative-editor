@@ -94,6 +94,47 @@ test(
 );
 
 test(
+  "an offline client and an online client edit the same line and both converge",
+  { skip: !existsSync(serverBin) },
+  async (t) => {
+    const { proc, addr, dir } = await startServer();
+    t.after(() => {
+      proc.kill();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    const a = await connectClient(1, addr, "offline-conflict");
+    const b = await connectClient(2, addr, "offline-conflict");
+    t.after(() => {
+      a.close();
+      b.close();
+    });
+
+    a.localEdit("hello world");
+    await waitFor("B to receive hello world", () => b.editor.text === "hello world");
+    await waitFor("A's edit to be acked", () => a.pendingCount === 0);
+
+    // A goes offline. B rewrites the start of the line while A is
+    // away, and A edits the same spot without seeing B's change.
+    a.dropConnection();
+    await waitFor("A to report reconnecting", () => a.status === "reconnecting");
+    b.localEdit(">> hello world");
+    await waitFor("B's own edit to land", () => b.editor.text === ">> hello world");
+    a.localEdit("hello world!");
+    assert.equal(a.pendingCount, 1);
+
+    // A comes back: the server transforms A's edit past B's, and both
+    // clients end up with both edits.
+    await waitFor("A to reconnect", () => a.status === "connected");
+    await waitFor(
+      "clients to converge",
+      () => a.editor.text === b.editor.text && a.pendingCount === 0,
+    );
+    assert.equal(a.editor.text, ">> hello world!");
+  },
+);
+
+test(
   "two clients type together and converge",
   { skip: !existsSync(serverBin) },
   async (t) => {

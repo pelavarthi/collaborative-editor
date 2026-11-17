@@ -214,7 +214,9 @@ export function bindEditor(
           ? "connecting…"
           : client.status === "reconnecting"
             ? "reconnecting…"
-            : "disconnected";
+            : client.status === "offline"
+              ? "offline — edits saved on this device"
+              : "disconnected";
     const unsent = client.pendingCount > 0 ? ` · ${client.pendingCount} unsent` : "";
     const mode = client.readOnly ? " · read-only" : "";
     statusEl.textContent = client.lastError

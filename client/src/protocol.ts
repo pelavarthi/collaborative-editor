@@ -156,7 +156,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isAttrs(value: unknown): value is Attrs {
+export function isAttrs(value: unknown): value is Attrs {
   return (
     isObject(value) &&
     typeof value.bold === "boolean" &&
@@ -179,7 +179,7 @@ function isFormatChange(value: unknown): value is FormatChange {
   return true;
 }
 
-function isOp(value: unknown): value is Op {
+export function isOp(value: unknown): value is Op {
   if (!isObject(value)) return false;
   if ("Insert" in value && isObject(value.Insert)) {
     const ins = value.Insert;
