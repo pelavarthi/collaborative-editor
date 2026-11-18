@@ -434,7 +434,7 @@ async fn handle_message(
                     message: "not in a room".into(),
                 });
             };
-            let doc_len = state.room.text().chars().count();
+            let doc_len = state.room.len();
             match state.presence.update(client_id, cursor, selection, doc_len) {
                 Some(presence) => {
                     let _ = state.tx.send(Broadcast {

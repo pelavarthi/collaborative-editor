@@ -53,3 +53,5 @@ The server is also tested under chaos: several clients type at once
 with random lag between keystrokes, one drops off mid-session and
 comes back, and every client still ends up with the same text at the
 same version. See `crates/server/tests/chaos.rs`.
+
+Benchmarks live in `crates/server/examples/bench.rs` (`cargo run --release -p collab-server --example bench`); results and what was tuned are in `BENCHMARKS.md`. Typing at the end of a 10k-character document costs about 86 ns per keystroke after the Day 13 tuning; mid-document edits still scan from the start, so a rope is the next step if documents get large.

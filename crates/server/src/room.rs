@@ -35,6 +35,11 @@ impl Room {
         self.doc.text()
     }
 
+    /// Length of the document in characters. O(1).
+    pub fn len(&self) -> usize {
+        self.doc.len()
+    }
+
     /// The formatting of each character, in order. A client that joins
     /// needs this with the text, or its copy would lose the bold.
     pub fn attrs(&self) -> &[Attrs] {

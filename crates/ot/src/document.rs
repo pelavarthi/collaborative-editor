@@ -18,6 +18,11 @@ use crate::op::Op;
 pub struct Document {
     text: String,
     attrs: Vec<Attrs>,
+    /// Character count, kept in step with the text. `len()` and the
+    /// end-of-document check in `char_to_byte` are O(1) because of
+    /// it: without it every keystroke re-counted every character in
+    /// the document, so typing got slower as the document grew.
+    len: usize,
 }
 
 /// One run of equally formatted text, for rendering: the text and the
@@ -72,10 +77,12 @@ impl Document {
     }
 
     pub fn from_text(text: &str) -> Self {
-        let attrs = vec![Attrs::plain(); text.chars().count()];
+        let len = text.chars().count();
+        let attrs = vec![Attrs::plain(); len];
         Self {
             text: text.to_string(),
             attrs,
+            len,
         }
     }
 
@@ -90,6 +97,7 @@ impl Document {
         Self {
             text: text.to_string(),
             attrs,
+            len,
         }
     }
 
@@ -115,9 +123,9 @@ impl Document {
         spans
     }
 
-    /// Length in characters.
+    /// Length in characters. O(1): the count is cached, not re-counted.
     pub fn len(&self) -> usize {
-        self.text.chars().count()
+        self.len
     }
 
     pub fn is_empty(&self) -> bool {
@@ -135,10 +143,11 @@ impl Document {
                     pos: *pos,
                     doc_len: self.len(),
                 })?;
+                let added = text.chars().count();
                 self.text.insert_str(byte, text);
-                let inserted: Vec<Attrs> =
-                    vec![attrs.clone(); text.chars().count()];
+                let inserted: Vec<Attrs> = vec![attrs.clone(); added];
                 self.attrs.splice(*pos..*pos, inserted);
+                self.len += added;
                 Ok(())
             }
             Op::Delete { pos, len, .. } => {
@@ -156,6 +165,7 @@ impl Document {
                     })?;
                 self.text.replace_range(start..end, "");
                 self.attrs.drain(*pos..*pos + *len);
+                self.len -= *len;
                 Ok(())
             }
             Op::Format {
@@ -180,12 +190,22 @@ impl Document {
     }
 
     /// Byte offset of the pos-th character, or None when pos is past the end.
+    /// The two positions typing hits most, the start and the end, are
+    /// answered without scanning: appending to a long document used to
+    /// walk the whole string just to find its end. Anywhere else still
+    /// scans from the start, so a mid-document edit in a long document
+    /// is still O(pos); a rope would fix that, this does not.
     fn char_to_byte(&self, pos: usize) -> Option<usize> {
-        match self.text.char_indices().nth(pos) {
-            Some((byte, _)) => Some(byte),
-            None if pos == self.text.chars().count() => Some(self.text.len()),
-            None => None,
+        if pos == 0 {
+            return Some(0);
         }
+        if pos == self.len {
+            return Some(self.text.len());
+        }
+        if pos > self.len {
+            return None;
+        }
+        self.text.char_indices().nth(pos).map(|(byte, _)| byte)
     }
 }
 
@@ -193,6 +213,23 @@ impl Document {
 mod tests {
     use super::*;
     use crate::attrs::FormatChange;
+
+    #[test]
+    fn cached_length_stays_right_across_edits() {
+        let mut doc = Document::from_text("a\u{1F600}b");
+        assert_eq!(doc.len(), 3);
+        doc.apply(&Op::insert(1, 3, "xy")).unwrap();
+        assert_eq!(doc.len(), 5);
+        doc.apply(&Op::delete(1, 1, 2)).unwrap();
+        assert_eq!(doc.len(), 3);
+        assert_eq!(doc.text(), "axy");
+        doc.apply(&Op::format(1, 0, 2, FormatChange::bold(true)))
+            .unwrap();
+        assert_eq!(doc.len(), 3);
+        // A failed apply leaves the length alone too.
+        assert!(doc.apply(&Op::insert(1, 9, "z")).is_err());
+        assert_eq!(doc.len(), 3);
+    }
 
     #[test]
     fn insert_at_start_middle_and_end() {
