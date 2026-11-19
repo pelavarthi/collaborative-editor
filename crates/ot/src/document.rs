@@ -169,10 +169,7 @@ impl Document {
                 Ok(())
             }
             Op::Format {
-                pos,
-                len,
-                change,
-                ..
+                pos, len, change, ..
             } => {
                 if pos + len > self.len() {
                     return Err(OpError::FormatOutOfBounds {
@@ -352,10 +349,7 @@ mod tests {
             FormatChange::link(Some("https://example.com".into())),
         ))
         .unwrap();
-        assert_eq!(
-            doc.attrs()[0].link.as_deref(),
-            Some("https://example.com")
-        );
+        assert_eq!(doc.attrs()[0].link.as_deref(), Some("https://example.com"));
         assert_eq!(doc.attrs()[6].link, None);
         doc.apply(&Op::format(1, 0, 5, FormatChange::link(None)))
             .unwrap();
@@ -394,10 +388,7 @@ mod tests {
 
     #[test]
     fn spans_merge_equal_runs_and_skip_nothing() {
-        let doc = Document::from_parts(
-            "aab",
-            vec![Attrs::bold(), Attrs::bold(), Attrs::plain()],
-        );
+        let doc = Document::from_parts("aab", vec![Attrs::bold(), Attrs::bold(), Attrs::plain()]);
         assert_eq!(
             doc.spans(),
             vec![

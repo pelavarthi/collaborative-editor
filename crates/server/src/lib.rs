@@ -108,11 +108,10 @@ impl RoomState {
         }
         self.ops_since_snapshot += 1;
         if self.ops_since_snapshot >= SNAPSHOT_EVERY {
-            if let Err(err) = self.store.save_snapshot(
-                version,
-                self.room.text(),
-                self.room.attrs(),
-            ) {
+            if let Err(err) = self
+                .store
+                .save_snapshot(version, self.room.text(), self.room.attrs())
+            {
                 eprintln!("could not save snapshot at version {version}: {err}");
                 return;
             }
@@ -239,12 +238,10 @@ async fn handle_connection(
     // documents exist, then joins one on the same connection.
     let (room_id, client_id, read_only, mut rx) = loop {
         let msg = match read.next().await {
-            Some(Ok(Message::Text(text))) => {
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(msg) => msg,
-                    Err(err) => return Err(format!("bad message: {err}").into()),
-                }
-            }
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMessage>(&text) {
+                Ok(msg) => msg,
+                Err(err) => return Err(format!("bad message: {err}").into()),
+            },
             Some(Ok(_)) => return Err("first message was not text".into()),
             Some(Err(err)) => return Err(err.into()),
             None => return Ok(()),
@@ -448,7 +445,11 @@ async fn handle_message(
                 }),
             }
         }
-        ClientMessage::Op { base_version, seq, op } => {
+        ClientMessage::Op {
+            base_version,
+            seq,
+            op,
+        } => {
             // A viewer can watch, but its edits are refused before
             // anything is applied or broadcast: read-only is enforced
             // here, not just in the UI, so a hand-made client cannot

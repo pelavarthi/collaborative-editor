@@ -96,17 +96,20 @@ fn both_orders_converge(doc: &str, a: &Op, b: &Op) {
 /// orders disagree. Those pairs are skipped here; everything else the
 /// transform claims must converge.
 fn conflicting_formats(a: &Op, b: &Op) -> bool {
-    let (Op::Format {
-        pos: ap,
-        len: al,
-        change: ac,
-        ..
-    }, Op::Format {
-        pos: bp,
-        len: bl,
-        change: bc,
-        ..
-    }) = (a, b)
+    let (
+        Op::Format {
+            pos: ap,
+            len: al,
+            change: ac,
+            ..
+        },
+        Op::Format {
+            pos: bp,
+            len: bl,
+            change: bc,
+            ..
+        },
+    ) = (a, b)
     else {
         return false;
     };

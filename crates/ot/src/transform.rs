@@ -131,10 +131,7 @@ pub fn transform(op: &Op, against: &Op) -> Op {
                 Op::delete(*site, *pos, len + other_len)
             }
         }
-        (
-            Op::Delete { .. },
-            Op::Format { .. },
-        ) => {
+        (Op::Delete { .. }, Op::Format { .. }) => {
             // Formatting never moves text, so a delete is untouched.
             op.clone()
         }
@@ -202,10 +199,7 @@ pub fn transform(op: &Op, against: &Op) -> Op {
             let shift = (*other_len).min(pos.saturating_sub(*other_pos));
             Op::format(*site, pos - shift, len - overlap, change.clone())
         }
-        (
-            Op::Format { .. },
-            Op::Format { .. },
-        ) => {
+        (Op::Format { .. }, Op::Format { .. }) => {
             // Formatting never moves text, and the op applied later
             // wins on any overlap, so a format is untouched by another.
             op.clone()
@@ -451,8 +445,14 @@ mod tests {
         // At the edges the insert keeps its own (plain) attributes:
         // on the other side the format shifts or stays put instead of
         // growing, so the text stays plain there too.
-        assert_eq!(transform(&Op::insert(1, 0, "X"), &fmt), Op::insert(1, 0, "X"));
-        assert_eq!(transform(&Op::insert(1, 5, "X"), &fmt), Op::insert(1, 5, "X"));
+        assert_eq!(
+            transform(&Op::insert(1, 0, "X"), &fmt),
+            Op::insert(1, 0, "X")
+        );
+        assert_eq!(
+            transform(&Op::insert(1, 5, "X"), &fmt),
+            Op::insert(1, 5, "X")
+        );
     }
 
     #[test]
@@ -509,9 +509,9 @@ mod tests {
             .unwrap();
         doc.apply(&Op::format(2, 4, 7, FormatChange::italic(true)))
             .unwrap();
-        assert_eq!(doc.attrs()[4].bold, true);
-        assert_eq!(doc.attrs()[4].italic, true);
-        assert_eq!(doc.attrs()[0].italic, false);
-        assert_eq!(doc.attrs()[10].bold, false);
+        assert!(doc.attrs()[4].bold);
+        assert!(doc.attrs()[4].italic);
+        assert!(!doc.attrs()[0].italic);
+        assert!(!doc.attrs()[10].bold);
     }
 }

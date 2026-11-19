@@ -185,9 +185,9 @@ impl History {
 /// an inverse, and such a format simply never reaches the undo stack.
 fn inverse(op: &Op, before: &Document) -> Option<Op> {
     match op {
-        Op::Insert { site, pos, text, .. } => {
-            Some(Op::delete(*site, *pos, text.chars().count()))
-        }
+        Op::Insert {
+            site, pos, text, ..
+        } => Some(Op::delete(*site, *pos, text.chars().count())),
         Op::Delete { site, pos, len } => {
             let text: String = before.text().chars().skip(*pos).take(*len).collect();
             if text.chars().count() != *len {

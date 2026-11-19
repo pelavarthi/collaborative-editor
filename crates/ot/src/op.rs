@@ -43,12 +43,7 @@ impl Op {
         Self::insert_styled(site, pos, text, Attrs::plain())
     }
 
-    pub fn insert_styled(
-        site: u64,
-        pos: usize,
-        text: impl Into<String>,
-        attrs: Attrs,
-    ) -> Self {
+    pub fn insert_styled(site: u64, pos: usize, text: impl Into<String>, attrs: Attrs) -> Self {
         Op::Insert {
             site,
             pos,
@@ -72,9 +67,7 @@ impl Op {
 
     pub fn site(&self) -> u64 {
         match self {
-            Op::Insert { site, .. } | Op::Delete { site, .. } | Op::Format { site, .. } => {
-                *site
-            }
+            Op::Insert { site, .. } | Op::Delete { site, .. } | Op::Format { site, .. } => *site,
         }
     }
 

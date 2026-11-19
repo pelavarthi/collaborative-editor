@@ -271,17 +271,12 @@ mod tests {
         let store = Store::new(&dir, "room1");
         store.append(1, &Op::insert(1, 0, "abc")).unwrap();
         store
-            .append(
-                2,
-                &Op::format(1, 0, 2, FormatChange::bold(true)),
-            )
+            .append(2, &Op::format(1, 0, 2, FormatChange::bold(true)))
             .unwrap();
         let mut doc = Document::from_text("abc");
         doc.apply(&Op::format(1, 0, 2, FormatChange::bold(true)))
             .unwrap();
-        store
-            .save_snapshot(2, doc.text(), doc.attrs())
-            .unwrap();
+        store.save_snapshot(2, doc.text(), doc.attrs()).unwrap();
 
         let restored = Store::new(&dir, "room1").load().unwrap().unwrap();
         assert_eq!(restored.doc.text(), "abc");

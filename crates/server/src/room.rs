@@ -40,6 +40,10 @@ impl Room {
         self.doc.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The formatting of each character, in order. A client that joins
     /// needs this with the text, or its copy would lose the bold.
     pub fn attrs(&self) -> &[Attrs] {

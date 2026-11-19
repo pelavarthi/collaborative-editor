@@ -69,12 +69,7 @@ fn unix_secs(time: SystemTime) -> u64 {
 }
 
 /// One row from a room's current text, version, and last save time.
-pub fn from_room(
-    id: &str,
-    text: &str,
-    version: usize,
-    updated_at: Option<SystemTime>,
-) -> DocInfo {
+pub fn from_room(id: &str, text: &str, version: usize, updated_at: Option<SystemTime>) -> DocInfo {
     DocInfo {
         id: id.to_string(),
         title: title_of(text, id),
@@ -143,7 +138,10 @@ mod tests {
 
     #[test]
     fn title_is_the_first_line() {
-        assert_eq!(title_of("Shopping list\nmilk\neggs", "room1"), "Shopping list");
+        assert_eq!(
+            title_of("Shopping list\nmilk\neggs", "room1"),
+            "Shopping list"
+        );
     }
 
     #[test]

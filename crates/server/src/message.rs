@@ -32,7 +32,11 @@ pub enum ClientMessage {
     /// `seq` counts this client's ops from 1 up, so a resend after a
     /// lost ack carries the same number and the server can tell it
     /// apart from a new edit.
-    Op { base_version: usize, seq: u64, op: Op },
+    Op {
+        base_version: usize,
+        seq: u64,
+        op: Op,
+    },
     /// A reconnecting client asking for the ops it missed since
     /// `base_version`, so it can catch up without taking a full copy.
     Sync { base_version: usize },

@@ -59,7 +59,11 @@ impl Client {
 
     /// Joins as a viewer: the client can see the document, but the
     /// server refuses its edits.
-    async fn connect_read_only(addr: SocketAddr, room: &str, client_id: u64) -> (Self, ServerMessage) {
+    async fn connect_read_only(
+        addr: SocketAddr,
+        room: &str,
+        client_id: u64,
+    ) -> (Self, ServerMessage) {
         Self::connect_with_mode(addr, room, client_id, None, true).await
     }
 
@@ -759,7 +763,13 @@ async fn read_only_join_reports_read_only_and_refuses_edits() {
     let (mut editor, _) = Client::connect(addr, "notes", 1).await;
     let (mut viewer, joined) = Client::connect_read_only(addr, "notes", 2).await;
     assert!(
-        matches!(joined, ServerMessage::Joined { read_only: true, .. }),
+        matches!(
+            joined,
+            ServerMessage::Joined {
+                read_only: true,
+                ..
+            }
+        ),
         "read-only join must say so: {joined:?}"
     );
 
@@ -771,7 +781,8 @@ async fn read_only_join_reports_read_only_and_refuses_edits() {
             message: "this document is read-only for you".to_string(),
         }
     );
-    let leaked = tokio::time::timeout(Duration::from_millis(200), editor.next_server_message()).await;
+    let leaked =
+        tokio::time::timeout(Duration::from_millis(200), editor.next_server_message()).await;
     assert!(leaked.is_err(), "refused op reached the editor: {leaked:?}");
 
     // The editor can still write, and the viewer still sees it: the

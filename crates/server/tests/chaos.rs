@@ -133,9 +133,7 @@ impl ChaosClient {
                 let Message::Text(text) = msg else { continue };
                 let parsed: ServerMessage = serde_json::from_str(&text).unwrap();
                 match parsed {
-                    ServerMessage::Presence { .. } | ServerMessage::PresenceLeft { .. } => {
-                        continue
-                    }
+                    ServerMessage::Presence { .. } | ServerMessage::PresenceLeft { .. } => continue,
                     _ => return parsed,
                 }
             }
@@ -211,9 +209,7 @@ impl ChaosClient {
                     }
                     return;
                 }
-                ServerMessage::Snapshot {
-                    text, version, ..
-                } => {
+                ServerMessage::Snapshot { text, version, .. } => {
                     self.doc = Document::from_text(&text);
                     self.version = version;
                     return;
@@ -296,7 +292,10 @@ async fn four_editors_type_at_once_and_converge() {
     // Every client agrees with the server, on the text and the
     // version, and the version is exactly the ops the server applied.
     let applied: usize = clients.iter().map(|client| client.applied).sum();
-    assert_eq!(version, applied, "version {version} != applied ops {applied}");
+    assert_eq!(
+        version, applied,
+        "version {version} != applied ops {applied}"
+    );
     for client in &clients {
         assert_eq!(
             client.doc.text(),
@@ -329,7 +328,9 @@ async fn everyone_types_at_the_same_spot_and_nothing_is_lost() {
             let mut client = client;
             let mut rng = Rng::new(100 + client_id);
             for _ in 0..15 {
-                client.send_op(Op::insert(client_id, 0, letter.to_string())).await;
+                client
+                    .send_op(Op::insert(client_id, 0, letter.to_string()))
+                    .await;
                 tokio::time::sleep(Duration::from_millis(rng.below(81) as u64)).await;
             }
             client.drain().await;
@@ -381,7 +382,8 @@ async fn client_that_goes_dark_and_reconnects_catches_up() {
     let mut b = ChaosClient::connect(addr, room, 2).await;
     let mut c = ChaosClient::connect(addr, room, 3).await;
     for i in 0..10 {
-        b.send_op(Op::insert(2, b.doc.text().chars().count(), "b")).await;
+        b.send_op(Op::insert(2, b.doc.text().chars().count(), "b"))
+            .await;
         let _ = i;
         c.send_op(Op::insert(3, 0, "c")).await;
     }
